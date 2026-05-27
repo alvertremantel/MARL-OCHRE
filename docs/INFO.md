@@ -211,8 +211,10 @@ The output side of the project is already quite useful.
 `crates/marl-engine/src/binary_dump.rs` writes the high-fidelity binary outputs consumed by the standalone viewer:
 
 - `run_meta.json` — grid dimensions, species counts, field byte length, and cell record stride
-- `tick_<T>.field.bin` — raw little-endian `f32` field data in `[z][y][x][species]` order
-- `tick_<T>.cells.bin` — packed 25-byte `ViewerCellRecord` array (position, lineage ID, starter type, energy)
+- `tick_<T>.field.bin.zst` — losslessly compressed little-endian `f32` field data in `[z][y][x][species]` order by default (`.bin` if compression is disabled)
+- `tick_<T>.cells.bin.zst` — losslessly compressed packed 25-byte `ViewerCellRecord` array by default (`.bin` if compression is disabled)
+- `tick_<T>.ruleset_layers.bin.zst` — optional per-z-layer averages of continuous ruleset parameters, written on an independent cadence
+- `tick_<T>.rulesets.bin.zst` — optional per-cell deduplicated full ruleset dump with dictionary (dict section + per-cell references), written on an independent cadence
 
 The shared schema for these files lives in `crates/marl-format/` so both engine and viewer can reference the same constants without code duplication.
 

@@ -1,6 +1,6 @@
 use std::error::Error;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use marl_format::RunMeta;
 
@@ -64,11 +64,8 @@ pub fn load_snapshot(args: &ViewerArgs) -> Result<SnapshotPayload, Box<dyn Error
     }
 
     // --- tick_<T>.field.bin ---
-    let field_path = args
-        .output_dir
-        .join(format!("tick_{}.field.bin", args.tick));
-    let field_bytes = fs::read(&field_path)
-        .map_err(|e| format!("failed to read {}: {e}", field_path.display()))?;
+    let field_path = snapshot_path(&args.output_dir, &meta.field_file_pattern, args.tick)?;
+    let field_bytes = read_binary_payload(&field_path)?;
     if field_bytes.len() as u64 != meta.field_byte_len {
         return Err(format!(
             "{} has {} bytes, expected {} from run_meta.json",
@@ -139,7 +136,9 @@ pub fn discover_field_ticks(output_dir: &std::path::Path) -> Result<Vec<u64>, Bo
 /// `.field.bin`, and the middle portion is a valid `u64`.
 fn parse_field_tick_file_name(name: &str) -> Option<u64> {
     let without_prefix = name.strip_prefix("tick_")?;
-    let digits = without_prefix.strip_suffix(".field.bin")?;
+    let digits = without_prefix
+        .strip_suffix(".field.bin.zst")
+        .or_else(|| without_prefix.strip_suffix(".field.bin"))?;
     // Reject empty digit string or strings with non-digit characters
     if digits.is_empty() {
         return None;
@@ -155,9 +154,7 @@ fn parse_field_tick_file_name(name: &str) -> Option<u64> {
 // ---------------------------------------------------------------------------
 
 fn load_cell_records(args: &ViewerArgs, meta: &RunMeta) -> Result<Vec<LoadedCell>, Box<dyn Error>> {
-    let cells_path = args
-        .output_dir
-        .join(format!("tick_{}.cells.bin", args.tick));
+    let cells_path = snapshot_path(&args.output_dir, &meta.cell_file_pattern, args.tick)?;
 
     if !meta.write_binary_cells {
         eprintln!(
@@ -173,8 +170,7 @@ fn load_cell_records(args: &ViewerArgs, meta: &RunMeta) -> Result<Vec<LoadedCell
         return Ok(Vec::new());
     }
 
-    let raw = fs::read(&cells_path)
-        .map_err(|e| format!("failed to read {}: {e}", cells_path.display()))?;
+    let raw = read_binary_payload(&cells_path)?;
 
     let stride = marl_format::CELL_RECORD_STRIDE as usize;
     if raw.len() % stride != 0 {
@@ -198,6 +194,23 @@ fn load_cell_records(args: &ViewerArgs, meta: &RunMeta) -> Result<Vec<LoadedCell
     }
 
     Ok(cells)
+}
+
+fn snapshot_path(output_dir: &Path, pattern: &str, tick: u64) -> Result<PathBuf, Box<dyn Error>> {
+    if !pattern.contains("<T>") {
+        return Err(format!("snapshot pattern {pattern:?} does not contain <T>").into());
+    }
+    Ok(output_dir.join(pattern.replace("<T>", &tick.to_string())))
+}
+
+fn read_binary_payload(path: &Path) -> Result<Vec<u8>, Box<dyn Error>> {
+    let raw = fs::read(path).map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+    if path.extension().and_then(|ext| ext.to_str()) == Some("zst") {
+        zstd::stream::decode_all(&raw[..])
+            .map_err(|e| format!("failed to decompress {}: {e}", path.display()).into())
+    } else {
+        Ok(raw)
+    }
 }
 
 /// Parse a single 25-byte cell record manually with from_le_bytes.
@@ -359,6 +372,7 @@ mod tests {
     #[test]
     fn parse_field_tick_file_name_valid() {
         assert_eq!(parse_field_tick_file_name("tick_0.field.bin"), Some(0));
+        assert_eq!(parse_field_tick_file_name("tick_0.field.bin.zst"), Some(0));
         assert_eq!(parse_field_tick_file_name("tick_42.field.bin"), Some(42));
         assert_eq!(
             parse_field_tick_file_name("tick_18446744073709551615.field.bin"),
@@ -373,6 +387,7 @@ mod tests {
         assert_eq!(parse_field_tick_file_name("tick_0"), None);
         assert_eq!(parse_field_tick_file_name("tick_abc.field.bin"), None);
         assert_eq!(parse_field_tick_file_name("tick_1.cells.bin"), None);
+        assert_eq!(parse_field_tick_file_name("tick_1.cells.bin.zst"), None);
         assert_eq!(parse_field_tick_file_name("tick_-1.field.bin"), None);
         assert_eq!(parse_field_tick_file_name("extra_tick_1.field.bin"), None);
         assert_eq!(parse_field_tick_file_name(""), None);
@@ -389,6 +404,7 @@ mod tests {
             "tick_100.field.bin",
             "tick_3.field.bin",
             "tick_42.field.bin",
+            "tick_42.field.bin.zst",
             "tick_3.field.bin", // duplicate — overwrites, same tick
         ] {
             fs::write(dir.join(name), b"data").unwrap();
@@ -418,6 +434,35 @@ mod tests {
     fn discover_field_ticks_unreadable_dir() {
         let result = discover_field_ticks(std::path::Path::new("/nonexistent/path/12345"));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn snapshot_path_uses_run_meta_pattern() {
+        let path = snapshot_path(
+            std::path::Path::new("/tmp/opencode/meta_pattern_test"),
+            "tick_<T>.field.bin.zst",
+            42,
+        )
+        .unwrap();
+        assert_eq!(
+            path,
+            PathBuf::from("/tmp/opencode/meta_pattern_test/tick_42.field.bin.zst")
+        );
+    }
+
+    #[test]
+    fn read_binary_payload_decompresses_zstd() {
+        let dir = std::path::Path::new("/tmp/opencode/io_test_zstd");
+        let _ = fs::remove_dir_all(dir);
+        fs::create_dir_all(dir).unwrap();
+        let path = dir.join("sample.bin.zst");
+        let payload = b"hello compressed world";
+        fs::write(&path, zstd::stream::encode_all(&payload[..], 3).unwrap()).unwrap();
+
+        let decoded = read_binary_payload(&path).unwrap();
+        assert_eq!(decoded, payload);
+
+        let _ = fs::remove_dir_all(dir);
     }
 
     /// Helper: parse cells from in-memory bytes for testing.

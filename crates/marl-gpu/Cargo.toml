@@ -3,6 +3,9 @@ name = "marl-gpu"
 version.workspace = true
 edition.workspace = true
 
+[features]
+gpu = []
+
 [dependencies]
 marl-config = { path = "../marl-config" }
 marl-field = { path = "../marl-field" }

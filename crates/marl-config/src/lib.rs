@@ -168,6 +168,67 @@ impl Default for SimulationConfig {
 }
 
 /// Logging cadence, snapshot selection, image toggles, and output directory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BinaryCompression {
+    None,
+    Zstd,
+}
+
+impl BinaryCompression {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Zstd => "zstd",
+        }
+    }
+}
+
+impl Default for BinaryCompression {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RulesetOutputMode {
+    Off,
+    LayerAverages,
+    Full,
+    Both,
+}
+
+impl RulesetOutputMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::LayerAverages => "layer_averages",
+            Self::Full => "full",
+            Self::Both => "both",
+        }
+    }
+
+    pub fn is_enabled(self) -> bool {
+        self != Self::Off
+    }
+
+    pub fn writes_layer_averages(self) -> bool {
+        matches!(self, Self::LayerAverages | Self::Both)
+    }
+
+    pub fn writes_full_dump(self) -> bool {
+        matches!(self, Self::Full | Self::Both)
+    }
+}
+
+impl Default for RulesetOutputMode {
+    fn default() -> Self {
+        Self::Off
+    }
+}
+
+/// Logging cadence, snapshot selection, image toggles, and output directory.
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(default)]
 pub struct OutputConfig {
@@ -187,6 +248,10 @@ pub struct OutputConfig {
     // Toggle image types
     pub write_binary_field: bool,
     pub write_binary_cells: bool,
+    pub binary_compression: BinaryCompression,
+    pub binary_compression_level: i32,
+    pub ruleset_interval: u32,
+    pub ruleset_output_mode: RulesetOutputMode,
     pub write_tick_log: bool,
     pub write_csv_snapshots: bool,
     pub write_ancestry_map: bool,
@@ -206,6 +271,10 @@ impl Default for OutputConfig {
             xy_slice_depths_frac: Vec::new(),
             write_binary_field: true,
             write_binary_cells: true,
+            binary_compression: BinaryCompression::Zstd,
+            binary_compression_level: 3,
+            ruleset_interval: 1000,
+            ruleset_output_mode: RulesetOutputMode::Off,
             write_tick_log: false,
             write_csv_snapshots: false,
             write_ancestry_map: false,
@@ -245,8 +314,9 @@ impl Config {
         }
         let toml_path = config_path.unwrap_or_else(|| "marl.toml".to_string());
         if let Ok(content) = std::fs::read_to_string(&toml_path) {
-            if let Ok(parsed) = toml::from_str::<Config>(&content) {
-                cfg = parsed;
+            match toml::from_str::<Config>(&content) {
+                Ok(parsed) => cfg = parsed,
+                Err(err) => eprintln!("Warning: failed to parse config {}: {err}", toml_path),
             }
         }
 
@@ -273,6 +343,12 @@ impl Config {
                     }
                     i += 2;
                 }
+                "--ruleset-interval" if i + 1 < args.len() => {
+                    if let Ok(v) = args[i + 1].parse() {
+                        cfg.output.ruleset_interval = v;
+                    }
+                    i += 2;
+                }
                 "--images" if i + 1 < args.len() => {
                     if let Ok(v) = args[i + 1].parse() {
                         cfg.output.image_interval = v;
@@ -296,5 +372,48 @@ impl Config {
         }
 
         cfg
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn output_config_defaults_match_binary_plan() {
+        let out = OutputConfig::default();
+        assert!(out.write_binary_field);
+        assert!(out.write_binary_cells);
+        assert_eq!(out.binary_compression, BinaryCompression::Zstd);
+        assert_eq!(out.binary_compression_level, 3);
+        assert_eq!(out.ruleset_interval, 1000);
+        assert_eq!(out.ruleset_output_mode, RulesetOutputMode::Off);
+    }
+
+    #[test]
+    fn enum_labels_match_toml_strings() {
+        assert_eq!(BinaryCompression::None.as_str(), "none");
+        assert_eq!(BinaryCompression::Zstd.as_str(), "zstd");
+        assert_eq!(RulesetOutputMode::Off.as_str(), "off");
+        assert_eq!(RulesetOutputMode::LayerAverages.as_str(), "layer_averages");
+        assert_eq!(RulesetOutputMode::Full.as_str(), "full");
+        assert_eq!(RulesetOutputMode::Both.as_str(), "both");
+        assert!(!RulesetOutputMode::Off.is_enabled());
+        assert!(RulesetOutputMode::LayerAverages.is_enabled());
+        assert!(RulesetOutputMode::Full.is_enabled());
+        assert!(RulesetOutputMode::Both.is_enabled());
+    }
+
+    #[test]
+    fn ruleset_mode_writes_layer_and_full() {
+        assert!(!RulesetOutputMode::Off.writes_layer_averages());
+        assert!(RulesetOutputMode::LayerAverages.writes_layer_averages());
+        assert!(!RulesetOutputMode::Full.writes_layer_averages());
+        assert!(RulesetOutputMode::Both.writes_layer_averages());
+
+        assert!(!RulesetOutputMode::Off.writes_full_dump());
+        assert!(!RulesetOutputMode::LayerAverages.writes_full_dump());
+        assert!(RulesetOutputMode::Full.writes_full_dump());
+        assert!(RulesetOutputMode::Both.writes_full_dump());
     }
 }

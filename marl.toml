@@ -70,6 +70,14 @@ output_dir = "output/run_128x128x64"
 
 write_binary_field = true
 write_binary_cells = true
+binary_compression = "zstd"
+binary_compression_level = 3
+
+# Optional per-layer ruleset averages and/or full per-cell deduplicated ruleset
+# dumps. Written independently of the main snapshot cadence so you can store
+# them less frequently than field/cell dumps.
+ruleset_interval = 1000
+ruleset_output_mode = "off"          # "off" | "layer_averages" | "full" | "both"
 
 # Legacy CSV/PPM outputs are off by default. Re-enable these for lightweight
 # diagnostics instead of full-fidelity viewer ingestion.

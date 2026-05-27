@@ -8,3 +8,6 @@ marl-config = { path = "../marl-config" }
 marl-cell = { path = "../marl-cell" }
 marl-field = { path = "../marl-field" }
 marl-format = { path = "../marl-format" }
+serde.workspace = true
+serde_json.workspace = true
+zstd.workspace = true

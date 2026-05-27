@@ -33,6 +33,65 @@ pub const FIELD_LAYOUT: &str = "z_y_x_species";
 /// Size of one packed cell record in bytes.
 pub const CELL_RECORD_STRIDE: u32 = 25;
 
+/// Current binary format version written by the engine.
+pub const BINARY_FORMAT_VERSION: u32 = 2;
+
+/// Compression label for uncompressed binary payloads.
+pub const BINARY_COMPRESSION_NONE: &str = "none";
+
+/// Compression label for zstd-compressed binary payloads.
+pub const BINARY_COMPRESSION_ZSTD: &str = "zstd";
+
+/// Legacy/raw field snapshot filename pattern.
+pub const FIELD_FILE_PATTERN_RAW: &str = "tick_<T>.field.bin";
+
+/// Legacy/raw cell snapshot filename pattern.
+pub const CELL_FILE_PATTERN_RAW: &str = "tick_<T>.cells.bin";
+
+/// Per-layer ruleset average sidecar filename pattern.
+pub const RULESET_LAYER_FILE_PATTERN_RAW: &str = "tick_<T>.ruleset_layers.bin";
+
+/// Binary layout string for per-layer ruleset averages.
+pub const RULESET_LAYER_RECORD_LAYOUT: &str = "z:u16,reserved:u16,cell_count:u32,receptors:{k_half:f32,n_hill:f32,gain:f32}[s_receptors],transport:{uptake_rate:f32,secrete_rate:f32}[s_transporters],reactions:{k_m:f32,v_max:f32,k_cat:f32}[r_max],effectors:{threshold:f32,rate:f32}[s_effectors],fate:f32[4],hgt_propensity:f32,mutation_rate:f32";
+
+/// Full per-cell deduplicated ruleset dump filename pattern.
+pub const RULESET_FULL_FILE_PATTERN_RAW: &str = "tick_<T>.rulesets.bin";
+
+/// Magic bytes for the full ruleset dump file header: "MRSF" in ASCII.
+pub const RULESET_FULL_MAGIC: [u8; 4] = [b'M', b'R', b'S', b'F'];
+
+/// Version of the full ruleset dump binary format.
+pub const RULESET_FULL_FORMAT_VERSION: u32 = 1;
+
+/// Byte size of the full ruleset file header (magic + version + flags + dict_count + cell_count + ruleset_byte_size).
+pub const RULESET_FULL_HEADER_SIZE: u32 = 24;
+
+/// Byte stride of one per-cell reference record in the full ruleset dump.
+/// x:u16, y:u16, z:u16, dict_id:u32 = 10 bytes.
+pub const RULESET_FULL_CELL_REF_STRIDE: u32 = 10;
+
+/// Canonical byte size of a single deduplicated ruleset payload.
+///
+/// Layout (all little-endian; u8 fields are 1 byte, f32 fields are 4 bytes):
+///   receptors: 8 × {k_half:f32, n_hill:f32, gain:f32}           = 96 B
+///   transport: 8 × {uptake_rate:f32, secrete_rate:f32, ext_species:u8, int_species:u8} = 80 B
+///   reactions: 16 × {substrate:u8, product:u8, catalyst:u8, cofactor:u8, k_m:f32, v_max:f32, k_cat:f32} = 256 B
+///   effectors: 8 × {threshold:f32, rate:f32, int_species:u8, ext_species:u8} = 80 B
+///   fate: {division_energy:f32, death_energy:f32, quiescence_energy:f32, division_prep_ticks:f32} = 16 B
+///   hgt_propensity: f32 = 4 B
+///   mutation_rate: f32 = 4 B
+///   total = 536
+pub const RULESET_FULL_CANONICAL_SIZE: u32 = 536;
+
+/// Binary layout string for one canonical ruleset payload.
+pub const RULESET_FULL_PAYLOAD_LAYOUT: &str = "\
+receptors:{k_half:f32,n_hill:f32,gain:f32}[s_receptors],\
+transport:{uptake_rate:f32,secrete_rate:f32,ext_species:u8,int_species:u8}[s_transporters],\
+reactions:{substrate:u8,product:u8,catalyst:u8,cofactor:u8,k_m:f32,v_max:f32,k_cat:f32}[r_max],\
+effectors:{threshold:f32,rate:f32,int_species:u8,ext_species:u8}[s_effectors],\
+fate:{division_energy:f32,death_energy:f32,quiescence_energy:f32,division_prep_ticks:f32},\
+hgt_propensity:f32,mutation_rate:f32";
+
 // ---------------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------------
@@ -89,10 +148,39 @@ pub struct RunMeta {
     pub cell_record_stride: u32,
     #[serde(rename = "endianness")]
     pub endianness: String,
+    #[serde(
+        default = "default_binary_format_version",
+        rename = "binary_format_version"
+    )]
+    pub binary_format_version: u32,
+    #[serde(default = "default_binary_compression", rename = "binary_compression")]
+    pub binary_compression: String,
+    #[serde(default, rename = "binary_compression_level")]
+    pub binary_compression_level: i32,
     #[serde(rename = "write_binary_field")]
     pub write_binary_field: bool,
     #[serde(rename = "write_binary_cells")]
     pub write_binary_cells: bool,
+    #[serde(default = "default_field_file_pattern", rename = "field_file_pattern")]
+    pub field_file_pattern: String,
+    #[serde(default = "default_cell_file_pattern", rename = "cell_file_pattern")]
+    pub cell_file_pattern: String,
+}
+
+fn default_binary_format_version() -> u32 {
+    1
+}
+
+fn default_binary_compression() -> String {
+    BINARY_COMPRESSION_NONE.to_string()
+}
+
+fn default_field_file_pattern() -> String {
+    FIELD_FILE_PATTERN_RAW.to_string()
+}
+
+fn default_cell_file_pattern() -> String {
+    CELL_FILE_PATTERN_RAW.to_string()
 }
 
 impl RunMeta {
@@ -118,8 +206,13 @@ impl RunMeta {
             field_byte_len,
             cell_record_stride: CELL_RECORD_STRIDE,
             endianness: ENDIANNESS.to_string(),
+            binary_format_version: BINARY_FORMAT_VERSION,
+            binary_compression: BINARY_COMPRESSION_NONE.to_string(),
+            binary_compression_level: 0,
             write_binary_field,
             write_binary_cells,
+            field_file_pattern: FIELD_FILE_PATTERN_RAW.to_string(),
+            cell_file_pattern: CELL_FILE_PATTERN_RAW.to_string(),
         }
     }
 
@@ -152,6 +245,26 @@ impl RunMeta {
                 CELL_RECORD_STRIDE, self.cell_record_stride
             )));
         }
+        if self.binary_format_version == 0 || self.binary_format_version > BINARY_FORMAT_VERSION {
+            return Err(FormatError::new(format!(
+                "binary_format_version mismatch: expected 1..={}, got {}",
+                BINARY_FORMAT_VERSION, self.binary_format_version
+            )));
+        }
+        if self.binary_compression != BINARY_COMPRESSION_NONE
+            && self.binary_compression != BINARY_COMPRESSION_ZSTD
+        {
+            return Err(FormatError::new(format!(
+                "binary_compression mismatch: expected {} or {}, got {}",
+                BINARY_COMPRESSION_NONE, BINARY_COMPRESSION_ZSTD, self.binary_compression
+            )));
+        }
+        if self.field_file_pattern.is_empty() {
+            return Err(FormatError::new("field_file_pattern must not be empty"));
+        }
+        if self.cell_file_pattern.is_empty() {
+            return Err(FormatError::new("cell_file_pattern must not be empty"));
+        }
         if let Some(expected_len) =
             field_byte_len(self.grid_x, self.grid_y, self.grid_z, self.s_ext)
         {
@@ -183,6 +296,36 @@ pub fn field_byte_len(grid_x: u32, grid_y: u32, grid_z: u32, s_ext: u32) -> Opti
         .checked_mul(u64::from(grid_z))?
         .checked_mul(u64::from(s_ext))?;
     Some(count.checked_mul(4)?)
+}
+
+/// Compute the number of `f32` averages stored in one per-layer ruleset record.
+#[inline]
+pub fn ruleset_layer_value_count(
+    s_receptors: u32,
+    s_transporters: u32,
+    r_max: u32,
+    s_effectors: u32,
+) -> Option<u32> {
+    Some(
+        s_receptors
+            .checked_mul(3)?
+            .checked_add(s_transporters.checked_mul(2)?)?
+            .checked_add(r_max.checked_mul(3)?)?
+            .checked_add(s_effectors.checked_mul(2)?)?
+            .checked_add(6)?,
+    )
+}
+
+/// Compute the byte stride of one per-layer ruleset average record.
+#[inline]
+pub fn ruleset_layer_record_stride(
+    s_receptors: u32,
+    s_transporters: u32,
+    r_max: u32,
+    s_effectors: u32,
+) -> Option<u32> {
+    let values = ruleset_layer_value_count(s_receptors, s_transporters, r_max, s_effectors)?;
+    8u32.checked_add(values.checked_mul(4)?)
 }
 
 // ---------------------------------------------------------------------------
@@ -260,10 +403,15 @@ mod tests {
         assert_eq!(meta.field_dtype, "f32");
         assert_eq!(meta.field_layout, "z_y_x_species");
         assert_eq!(meta.endianness, "little");
+        assert_eq!(meta.binary_format_version, BINARY_FORMAT_VERSION);
+        assert_eq!(meta.binary_compression, "none");
+        assert_eq!(meta.binary_compression_level, 0);
         assert_eq!(meta.cell_record_stride, 25);
         assert!(meta.write_binary_field);
         assert!(meta.write_binary_cells);
         assert_eq!(meta.field_byte_len, 50_331_648);
+        assert_eq!(meta.field_file_pattern, FIELD_FILE_PATTERN_RAW);
+        assert_eq!(meta.cell_file_pattern, CELL_FILE_PATTERN_RAW);
     }
 
     #[test]
@@ -297,6 +445,38 @@ mod tests {
     }
 
     #[test]
+    fn test_run_meta_validate_bad_compression() {
+        let mut meta = RunMeta::new(128, 128, 64, 12, 8, true, true);
+        meta.binary_compression = "brotli".to_string();
+        let err = meta.validate().unwrap_err();
+        assert!(err.message.contains("binary_compression"));
+    }
+
+    #[test]
+    fn test_run_meta_legacy_defaults_still_validate() {
+        let json = r#"{
+            "grid_x": 128,
+            "grid_y": 128,
+            "grid_z": 64,
+            "s_ext": 12,
+            "m_int": 8,
+            "field_dtype": "f32",
+            "field_layout": "z_y_x_species",
+            "field_byte_len": 50331648,
+            "cell_record_stride": 25,
+            "endianness": "little",
+            "write_binary_field": true,
+            "write_binary_cells": true
+        }"#;
+        let meta: RunMeta = serde_json::from_str(json).unwrap();
+        assert_eq!(meta.binary_format_version, 1);
+        assert_eq!(meta.binary_compression, BINARY_COMPRESSION_NONE);
+        assert_eq!(meta.field_file_pattern, FIELD_FILE_PATTERN_RAW);
+        assert_eq!(meta.cell_file_pattern, CELL_FILE_PATTERN_RAW);
+        assert!(meta.validate().is_ok());
+    }
+
+    #[test]
     fn test_run_meta_serde_round_trip() {
         let meta = RunMeta::new(128, 128, 64, 12, 8, true, false);
         let json = serde_json::to_string_pretty(&meta).unwrap();
@@ -308,10 +488,21 @@ mod tests {
         assert_eq!(meta.m_int, back.m_int);
         assert_eq!(meta.write_binary_field, back.write_binary_field);
         assert_eq!(meta.write_binary_cells, back.write_binary_cells);
+        assert_eq!(meta.binary_format_version, back.binary_format_version);
+        assert_eq!(meta.binary_compression, back.binary_compression);
+        assert_eq!(meta.field_file_pattern, back.field_file_pattern);
+        assert_eq!(meta.cell_file_pattern, back.cell_file_pattern);
         // field names match JSON
         assert!(json.contains("\"grid_x\""));
         assert!(json.contains("\"field_dtype\""));
         assert!(json.contains("\"cell_record_stride\""));
+        assert!(json.contains("\"binary_compression\""));
+    }
+
+    #[test]
+    fn test_ruleset_layer_stride_helpers() {
+        assert_eq!(ruleset_layer_value_count(8, 8, 16, 8), Some(110));
+        assert_eq!(ruleset_layer_record_stride(8, 8, 16, 8), Some(448));
     }
 
     #[test]
@@ -326,5 +517,11 @@ mod tests {
         assert_eq!(FIELD_DTYPE, "f32");
         assert_eq!(FIELD_LAYOUT, "z_y_x_species");
         assert_eq!(CELL_RECORD_STRIDE, 25);
+        assert_eq!(FIELD_FILE_PATTERN_RAW, "tick_<T>.field.bin");
+        assert_eq!(CELL_FILE_PATTERN_RAW, "tick_<T>.cells.bin");
+        assert_eq!(
+            RULESET_LAYER_FILE_PATTERN_RAW,
+            "tick_<T>.ruleset_layers.bin"
+        );
     }
 }

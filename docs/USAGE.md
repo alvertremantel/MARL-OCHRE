@@ -84,6 +84,7 @@ built-in defaults and any TOML config file:
 | `--ticks <n>` | Total simulation ticks | 5000 |
 | `--stats <n>` | Stdout stats interval (ticks) | 100 |
 | `--snapshot <n>` | Binary (and optional CSV) snapshot interval | 500 |
+| `--ruleset-interval <n>` | Per-layer ruleset-average binary interval | 1000 |
 | `--images <n>` | PPM image snapshot interval | 500 |
 | `--seed <n>` | Cells to seed per starter metabolism | 30 |
 | `--output <dir>` | Output directory | `output/run_128x128x64` |
@@ -209,8 +210,12 @@ Output cadence, directories, and format toggles:
 | `image_interval` | u32 | 500 | Ticks between PPM image dumps |
 | `seed_count` | usize | 30 | Initial cells per starter metabolism |
 | `output_dir` | string | `"output/run_128x128x64"` | Output root directory |
-| `write_binary_field` | bool | true | Write `tick_<T>.field.bin` |
-| `write_binary_cells` | bool | true | Write `tick_<T>.cells.bin` |
+| `write_binary_field` | bool | true | Write `tick_<T>.field.bin.zst` by default |
+| `write_binary_cells` | bool | true | Write `tick_<T>.cells.bin.zst` by default |
+| `binary_compression` | string | `"zstd"` | Binary payload compression: `"none"` or `"zstd"` |
+| `binary_compression_level` | i32 | 3 | Zstd compression level for binary payloads |
+| `ruleset_interval` | u32 | 1000 | Ticks between ruleset binary sidecars |
+| `ruleset_output_mode` | string | `"off"` | `"off"` / `"layer_averages"` / `"full"` / `"both"` |
 | `write_tick_log` | bool | false | Write `ticks.csv` |
 | `write_csv_snapshots` | bool | false | Write per-tick CSV snapshots |
 | `xz_snapshot_species` | [usize] | [] | Species indices for XZ cross-section PPMs |
@@ -229,8 +234,8 @@ Runs write into `output_dir` (default: `output/run_128x128x64`).
 | File | Format | Description |
 |------|--------|-------------|
 | `run_meta.json` | JSON | Grid dimensions, species counts, binary byte layouts, snapshot interval |
-| `tick_<T>.field.bin` | raw f32 LE | Full extracellular field in `[z][y][x][species]` order |
-| `tick_<T>.cells.bin` | packed binary | Sparse cell records (pos, lineage_id, starter_type, energy) |
+| `tick_<T>.field.bin.zst` | zstd-compressed raw f32 LE | Full extracellular field in `[z][y][x][species]` order |
+| `tick_<T>.cells.bin.zst` | zstd-compressed packed binary | Sparse cell records (pos, lineage_id, starter_type, energy) |
 | `summary.md` | Markdown | End-of-run population, chemistry, and configuration summary |
 
 ### Opt-in via `marl.toml`
@@ -238,6 +243,8 @@ Runs write into `output_dir` (default: `output/run_128x128x64`).
 | File | Requires | Description |
 |------|----------|-------------|
 | `ticks.csv` | `write_tick_log = true` | Per-tick population and z-layer counts |
+| `tick_<T>.ruleset_layers.bin.zst` | `ruleset_output_mode = "layer_averages"` or `"both"` | Per-z-layer continuous ruleset-parameter averages |
+| `tick_<T>.rulesets.bin.zst` | `ruleset_output_mode = "full"` or `"both"` | Deduplicated per-cell full ruleset dump with dictionary |
 | `chem_<tick>.csv` | `write_csv_snapshots = true` | Full field dump as CSV |
 | `cells_<tick>.csv` | `write_csv_snapshots = true` | All cell states as CSV |
 | `reactions_<tick>.csv` | `write_csv_snapshots = true` | All active reactions as CSV |
@@ -251,6 +258,13 @@ python scripts/check_binary_dump.py output/run_128x128x64 0
 ```
 
 See [`docs/SCRIPTS.md`](SCRIPTS.md) for details.
+
+### Compression and viewer compatibility
+
+- Binary field/cell payloads are **zstd-compressed by default**.
+- Set `binary_compression = "none"` to restore legacy raw `.bin` files.
+- The viewer auto-detects both raw and `.zst` snapshots from `run_meta.json`.
+- `field_byte_len` in `run_meta.json` always describes the **decompressed** field size.
 
 ---
 

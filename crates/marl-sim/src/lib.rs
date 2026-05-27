@@ -40,7 +40,9 @@ pub fn run(cfg: Config, _use_gpu_diffusion: bool) {
     // Create the data logger for optional CSV diagnostics and summaries.
     let mut logger = DataLogger::new(&cfg.output.output_dir, cfg.output.write_tick_log)
         .expect("Failed to create data logger / output directory");
-    let writes_binary = cfg.output.write_binary_field || cfg.output.write_binary_cells;
+    let writes_binary = cfg.output.write_binary_field
+        || cfg.output.write_binary_cells
+        || cfg.output.ruleset_output_mode.is_enabled();
     if writes_binary {
         binary_dump::write_run_meta(&cfg.output).expect("Failed to write run metadata");
     }
@@ -298,7 +300,7 @@ pub fn run(cfg: Config, _use_gpu_diffusion: bool) {
         if tick % cfg.output.snapshot_interval == 0 || tick == cfg.output.max_ticks - 1 {
             let t = tick as u64;
             if cfg.output.write_binary_field {
-                if let Err(e) = binary_dump::write_field_dump(&field, t, &cfg.output.output_dir) {
+                if let Err(e) = binary_dump::write_field_dump(&field, t, &cfg.output) {
                     eprintln!(
                         "Warning: failed to write binary field snapshot at tick {}: {}",
                         tick, e
@@ -306,7 +308,7 @@ pub fn run(cfg: Config, _use_gpu_diffusion: bool) {
                 }
             }
             if cfg.output.write_binary_cells {
-                if let Err(e) = binary_dump::write_cell_dump(&cells, t, &cfg.output.output_dir) {
+                if let Err(e) = binary_dump::write_cell_dump(&cells, t, &cfg.output) {
                     eprintln!(
                         "Warning: failed to write binary cell snapshot at tick {}: {}",
                         tick, e
@@ -334,6 +336,29 @@ pub fn run(cfg: Config, _use_gpu_diffusion: bool) {
                         tick, e
                     );
                 }
+            }
+        }
+
+        let mode = cfg.output.ruleset_output_mode;
+        if mode.is_enabled()
+            && (tick % cfg.output.ruleset_interval == 0 || tick == cfg.output.max_ticks - 1)
+        {
+            let t = tick as u64;
+            if mode.writes_layer_averages()
+                && let Err(e) = binary_dump::write_ruleset_layer_dump(&cells, t, &cfg.output)
+            {
+                eprintln!(
+                    "Warning: failed to write binary ruleset layer snapshot at tick {}: {}",
+                    tick, e
+                );
+            }
+            if mode.writes_full_dump()
+                && let Err(e) = binary_dump::write_ruleset_full_dump(&cells, t, &cfg.output)
+            {
+                eprintln!(
+                    "Warning: failed to write binary ruleset full dump at tick {}: {}",
+                    tick, e
+                );
             }
         }
 

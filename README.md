@@ -18,7 +18,8 @@ The current codebase is a Winogradsky-column style simulation: oxidant and carbo
 - Computes a per-voxel light field from top-down Beer-Lambert attenuation
 - Updates each cell through receptor, transport, reaction, effector, and fate phases
 - Supports mutation of kinetic parameters and rare structural rewiring of reactions
-- Writes raw binary field/cell snapshots for viewer ingestion, plus optional CSV/PPM diagnostics
+- Writes losslessly compressed binary field/cell snapshots for viewer ingestion, plus optional CSV/PPM diagnostics
+- Can optionally write per-layer ruleset-parameter averages on a slower cadence than field/cell snapshots
 
 ## Key Crates
 
