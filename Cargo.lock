@@ -1301,6 +1301,7 @@ dependencies = [
  "marl-gpu",
  "marl-output",
  "rand",
+ "serde_json",
 ]
 
 [[package]]

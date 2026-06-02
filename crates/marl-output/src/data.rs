@@ -21,7 +21,10 @@ use std::io::{BufWriter, Result, Write};
 use std::path::{Path, PathBuf};
 
 use marl_cell::cell::*;
-use marl_config::stoich::{StoichRunLedger, StoichTickLedger};
+use marl_config::stoich::{
+    STOICH_RESERVOIR_COUNT, STOICH_STAGE_COUNT, StoichEnforcement, StoichEvent, StoichReservoir,
+    StoichRunLedger, StoichStage, StoichTickLedger,
+};
 use marl_config::*;
 use marl_field::field::Field;
 use marl_field::light::LightField;
@@ -137,6 +140,9 @@ pub struct DataLogger {
     /// Optional compact stoichiometry audit tick log.
     stoich_writer: Option<BufWriter<File>>,
 
+    /// Optional full-system stoichiometry v2 event log.
+    stoich_v2_event_writer: Option<BufWriter<File>>,
+
     /// Registry mapping reaction topologies to stable integer IDs.
     /// Populated incrementally as new topologies are observed.
     pub registry: ReactionRegistry,
@@ -154,6 +160,7 @@ impl DataLogger {
         output_dir: &str,
         write_tick_log: bool,
         write_stoich_tick_log: bool,
+        write_stoich_v2_events: bool,
     ) -> Result<Self> {
         // Create the output directory (and any missing parents).
         let dir = PathBuf::from(output_dir);
@@ -197,10 +204,25 @@ impl DataLogger {
             None
         };
 
+        let stoich_v2_event_writer = if write_stoich_v2_events {
+            let events_path = dir.join("stoich_v2_events.csv");
+            let file = File::create(&events_path)?;
+            let mut writer = BufWriter::new(file);
+            writeln!(
+                writer,
+                "tick,stage,kind,actor_id,species_index,template_id,amount,model_c,model_h,model_o,model_s,model_redox,model_energy,reservoir_c,reservoir_h,reservoir_o,reservoir_s,reservoir_redox,reservoir_energy,residual_abs,balanced"
+            )?;
+            writer.flush()?;
+            Some(writer)
+        } else {
+            None
+        };
+
         Ok(Self {
             output_dir: dir,
             ticks_writer,
             stoich_writer,
+            stoich_v2_event_writer,
             registry: ReactionRegistry::new(),
         })
     }
@@ -331,6 +353,17 @@ impl DataLogger {
             ledger.delta.redox,
             ledger.delta.energy,
         )?;
+        writer.flush()
+    }
+
+    pub fn log_stoich_v2_events(&mut self, tick: u64, ledger: &StoichTickLedger) -> Result<()> {
+        let Some(writer) = self.stoich_v2_event_writer.as_mut() else {
+            return Ok(());
+        };
+
+        for event in &ledger.events {
+            write_stoich_event_row(writer, tick, event)?;
+        }
         writer.flush()
     }
 
@@ -495,9 +528,23 @@ impl DataLogger {
 
     pub fn write_stoich_summary(&self, total_ticks: u32, ledger: &StoichRunLedger) -> Result<()> {
         #[derive(serde::Serialize)]
-        struct StoichSummary<'a> {
+        struct LegacyStoichLedger {
+            tick_count: u64,
+            reaction_count: u64,
+            active_flux: f32,
+            imbalanced_reaction_count: u64,
+            unknown_species_flux: f32,
+            carbon_to_energy_flux: f32,
+            reductant_to_energy_flux: f32,
+            gross_material_abs: f32,
+            gross_total_abs: f32,
+            delta: marl_config::stoich::StoichBudgetDelta,
+        }
+
+        #[derive(serde::Serialize)]
+        struct StoichSummary {
             total_ticks: u32,
-            ledger: &'a StoichRunLedger,
+            ledger: LegacyStoichLedger,
             material_abs_sum: f32,
             net_material_abs_sum: f32,
             gross_total_abs_sum: f32,
@@ -509,7 +556,18 @@ impl DataLogger {
         let writer = BufWriter::new(file);
         let summary = StoichSummary {
             total_ticks,
-            ledger,
+            ledger: LegacyStoichLedger {
+                tick_count: ledger.tick_count,
+                reaction_count: ledger.reaction_count,
+                active_flux: ledger.active_flux,
+                imbalanced_reaction_count: ledger.imbalanced_reaction_count,
+                unknown_species_flux: ledger.unknown_species_flux,
+                carbon_to_energy_flux: ledger.carbon_to_energy_flux,
+                reductant_to_energy_flux: ledger.reductant_to_energy_flux,
+                gross_material_abs: ledger.gross_material_abs,
+                gross_total_abs: ledger.gross_total_abs,
+                delta: ledger.delta,
+            },
             material_abs_sum: ledger.material_abs_sum(),
             net_material_abs_sum: ledger.net_material_abs_sum(),
             gross_total_abs_sum: ledger.total_abs_sum(),
@@ -519,6 +577,72 @@ impl DataLogger {
                 "inactive species contribute to unknown_species_flux",
             ],
         };
+        serde_json::to_writer_pretty(writer, &summary).map_err(std::io::Error::other)
+    }
+
+    pub fn write_stoich_v2_summary(
+        &self,
+        total_ticks: u32,
+        enforcement: StoichEnforcement,
+        ledger: &StoichRunLedger,
+    ) -> Result<()> {
+        #[derive(serde::Serialize)]
+        struct NamedStage {
+            stage: StoichStage,
+            summary: marl_config::stoich::StoichStageSummary,
+        }
+
+        #[derive(serde::Serialize)]
+        struct NamedReservoir {
+            reservoir: StoichReservoir,
+            delta: marl_config::stoich::StoichBudgetDelta,
+        }
+
+        #[derive(serde::Serialize)]
+        struct StoichV2Summary<'a> {
+            schema_version: u32,
+            total_ticks: u32,
+            enforcement: &'static str,
+            tolerance: f32,
+            ledger: &'a StoichRunLedger,
+            stages: Vec<NamedStage>,
+            reservoirs: Vec<NamedReservoir>,
+            gross_residual_abs_sum: f32,
+            notes: [&'static str; 4],
+        }
+
+        let stages = (0..STOICH_STAGE_COUNT)
+            .map(|i| NamedStage {
+                stage: StoichStage::ALL[i],
+                summary: ledger.stage_summaries[i],
+            })
+            .collect();
+        let reservoirs = (0..STOICH_RESERVOIR_COUNT)
+            .map(|i| NamedReservoir {
+                reservoir: StoichReservoir::ALL[i],
+                delta: ledger.reservoir_deltas[i],
+            })
+            .collect();
+        let summary = StoichV2Summary {
+            schema_version: 2,
+            total_ticks,
+            enforcement: enforcement.as_str(),
+            tolerance: marl_config::stoich::STOICH_TOLERANCE,
+            ledger,
+            stages,
+            reservoirs,
+            gross_residual_abs_sum: ledger.gross_residual_abs(),
+            notes: [
+                "v2 covers full-system accepted flux accounting",
+                "strict mode is opt-in and uses balanced reaction templates",
+                "reservoir deltas close modeled sources and sinks without adding species slots",
+                "v1 stoich files remain legacy-reaction audit outputs",
+            ],
+        };
+
+        let path = self.output_dir.join("stoich_v2_summary.json");
+        let file = File::create(&path)?;
+        let writer = BufWriter::new(file);
         serde_json::to_writer_pretty(writer, &summary).map_err(std::io::Error::other)
     }
 
@@ -901,9 +1025,42 @@ impl DataLogger {
     }
 }
 
+fn write_stoich_event_row(
+    writer: &mut BufWriter<File>,
+    tick: u64,
+    event: &StoichEvent,
+) -> Result<()> {
+    writeln!(
+        writer,
+        "{},{},{},{},{},{},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{}",
+        tick,
+        event.stage.as_str(),
+        event.kind.as_str(),
+        event.actor_id,
+        event.species_index,
+        event.template_id,
+        event.amount,
+        event.model_delta.c,
+        event.model_delta.h,
+        event.model_delta.o,
+        event.model_delta.s,
+        event.model_delta.redox,
+        event.model_delta.energy,
+        event.reservoir_delta.c,
+        event.reservoir_delta.h,
+        event.reservoir_delta.o,
+        event.reservoir_delta.s,
+        event.reservoir_delta.redox,
+        event.reservoir_delta.energy,
+        event.residual_abs,
+        event.balanced as u8,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use marl_config::stoich::LegacyReactionAudit;
 
     fn test_output_dir(name: &str) -> String {
         let dir = std::env::temp_dir().join(name);
@@ -914,14 +1071,21 @@ mod tests {
     #[test]
     fn stoich_tick_log_and_summary_are_written() {
         let out_dir = test_output_dir("marl_output_stoich_audit_test");
-        let mut logger = DataLogger::new(&out_dir, false, true).unwrap();
+        let mut logger = DataLogger::new(&out_dir, false, true, true).unwrap();
         let mut tick = StoichTickLedger::default();
-        tick.record_legacy_reaction(3, 0, 15, 0xFF, 2.0);
+        tick.record_legacy_reaction(
+            LegacyReactionAudit::new(3, 0, 15, 0xFF, 2.0).actor(123),
+            true,
+        );
 
         logger.log_stoich_tick(7, &tick).unwrap();
+        logger.log_stoich_v2_events(7, &tick).unwrap();
         let mut run = StoichRunLedger::default();
         run.add_tick(&tick);
         logger.write_stoich_summary(8, &run).unwrap();
+        logger
+            .write_stoich_v2_summary(8, marl_config::stoich::StoichEnforcement::Audit, &run)
+            .unwrap();
 
         let dir = PathBuf::from(&out_dir);
         let ticks = fs::read_to_string(dir.join("stoich_ticks.csv")).unwrap();
@@ -934,6 +1098,13 @@ mod tests {
         assert!(summary.contains("\"carbon_to_energy_flux\": 2.0"));
         assert!(summary.contains("\"material_abs_sum\": 6.0"));
         assert!(summary.contains("\"gross_total_abs_sum\": 16.0"));
+
+        let v2_summary = fs::read_to_string(dir.join("stoich_v2_summary.json")).unwrap();
+        assert!(v2_summary.contains("\"schema_version\": 2"));
+        assert!(v2_summary.contains("\"enforcement\": \"audit\""));
+        let v2_events = fs::read_to_string(dir.join("stoich_v2_events.csv")).unwrap();
+        assert!(v2_events.contains("tick,stage,kind"));
+        assert!(v2_events.contains("reactions,legacy_reaction,123"));
 
         let _ = fs::remove_dir_all(&dir);
     }

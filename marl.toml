@@ -59,6 +59,7 @@ boundary_prime_layers = 2
 boundary_prime_oxidant = 0.5
 boundary_prime_carbon = 0.3
 boundary_prime_reductant = 0.5
+stoich_enforcement = "off"
 
 [output]
 max_ticks = 5000
@@ -85,6 +86,8 @@ write_tick_log = false
 write_csv_snapshots = false
 write_stoich_summary = false
 write_stoich_tick_log = false
+write_stoich_v2_summary = false
+write_stoich_v2_events = false
 xz_snapshot_species = []
 xy_slice_depths_frac = []
 write_ancestry_map = false

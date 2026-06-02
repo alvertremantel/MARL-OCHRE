@@ -4,6 +4,7 @@
 //! consumed by every other crate in the workspace.
 
 pub mod stoich;
+use stoich::StoichEnforcement;
 
 // ============================================================================
 // GRID DIMENSIONS — compile-time constants
@@ -105,6 +106,9 @@ pub struct SimulationConfig {
     pub boundary_prime_oxidant: f32,
     pub boundary_prime_carbon: f32,
     pub boundary_prime_reductant: f32,
+
+    // Stoichiometry accounting / enforcement
+    pub stoich_enforcement: StoichEnforcement,
 }
 
 impl Default for SimulationConfig {
@@ -165,6 +169,8 @@ impl Default for SimulationConfig {
             boundary_prime_oxidant: 0.5,
             boundary_prime_carbon: 0.3,
             boundary_prime_reductant: 0.5,
+
+            stoich_enforcement: StoichEnforcement::Off,
         }
     }
 }
@@ -248,6 +254,8 @@ pub struct OutputConfig {
     pub write_csv_snapshots: bool,
     pub write_stoich_summary: bool,
     pub write_stoich_tick_log: bool,
+    pub write_stoich_v2_summary: bool,
+    pub write_stoich_v2_events: bool,
     pub write_ancestry_map: bool,
     pub write_density_map: bool,
 }
@@ -273,6 +281,8 @@ impl Default for OutputConfig {
             write_csv_snapshots: false,
             write_stoich_summary: false,
             write_stoich_tick_log: false,
+            write_stoich_v2_summary: false,
+            write_stoich_v2_events: false,
             write_ancestry_map: false,
             write_density_map: false,
         }
@@ -386,6 +396,8 @@ mod tests {
         assert_eq!(out.ruleset_output_mode, RulesetOutputMode::Off);
         assert!(!out.write_stoich_summary);
         assert!(!out.write_stoich_tick_log);
+        assert!(!out.write_stoich_v2_summary);
+        assert!(!out.write_stoich_v2_events);
     }
 
     #[test]
@@ -422,11 +434,28 @@ mod tests {
             [output]
             write_stoich_summary = true
             write_stoich_tick_log = true
+            write_stoich_v2_summary = true
+            write_stoich_v2_events = true
             "#,
         )
         .unwrap();
 
         assert!(cfg.output.write_stoich_summary);
         assert!(cfg.output.write_stoich_tick_log);
+        assert!(cfg.output.write_stoich_v2_summary);
+        assert!(cfg.output.write_stoich_v2_events);
+    }
+
+    #[test]
+    fn stoich_enforcement_deserializes_from_toml() {
+        let cfg: Config = toml::from_str(
+            r#"
+            [simulation]
+            stoich_enforcement = "strict"
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(cfg.simulation.stoich_enforcement, StoichEnforcement::Strict);
     }
 }

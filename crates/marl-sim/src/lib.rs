@@ -4,7 +4,10 @@ pub mod starter_metabolisms;
 pub mod stats;
 
 use marl_cell::cell::*;
-use marl_config::stoich::{StoichRunLedger, StoichTickLedger};
+use marl_config::stoich::{
+    StoichEnforcement, StoichEventKind, StoichRecord, StoichReservoir, StoichRunLedger,
+    StoichStage, StoichTickLedger, external_delta, internal_pool_delta,
+};
 use marl_config::*;
 use marl_field::field::{Field, validate_diffusion_config};
 use marl_field::light::LightField;
@@ -14,9 +17,9 @@ use marl_output::binary_dump;
 use marl_output::data::DataLogger;
 use marl_output::snapshot;
 
-use crate::seeding::{init_field_boundaries, seed_cells};
+use crate::seeding::{init_field_boundaries_with_stoich, seed_cells};
 use crate::spatial::{
-    apply_deltas_to_neighbors, find_empty_neighbor_avoiding, read_neighbor_environment,
+    apply_deltas_to_neighbors_with_stoich, find_empty_neighbor_avoiding, read_neighbor_environment,
 };
 use crate::starter_metabolisms::{make_anaerobe, make_chemolithotroph, make_phototroph};
 use crate::stats::{print_stats, print_z_profile};
@@ -53,13 +56,24 @@ pub fn run(cfg: Config, _use_gpu_diffusion: bool) {
     let mut field = Field::new();
     let mut light = LightField::new();
 
-    let writes_stoich = cfg.output.write_stoich_summary || cfg.output.write_stoich_tick_log;
+    let writes_stoich_v1 = cfg.output.write_stoich_summary || cfg.output.write_stoich_tick_log;
+    let writes_stoich_v2 = cfg.simulation.stoich_enforcement.is_enabled()
+        || cfg.output.write_stoich_v2_summary
+        || cfg.output.write_stoich_v2_events;
+    let writes_stoich = writes_stoich_v1 || writes_stoich_v2;
+    let effective_stoich_enforcement =
+        if writes_stoich_v2 && cfg.simulation.stoich_enforcement == StoichEnforcement::Off {
+            StoichEnforcement::Audit
+        } else {
+            cfg.simulation.stoich_enforcement
+        };
 
     // Create the data logger for optional CSV diagnostics and summaries.
     let mut logger = DataLogger::new(
         &cfg.output.output_dir,
         cfg.output.write_tick_log,
         cfg.output.write_stoich_tick_log,
+        cfg.output.write_stoich_v2_events,
     )
     .expect("Failed to create data logger / output directory");
     let writes_binary = cfg.output.write_binary_field
@@ -71,7 +85,13 @@ pub fn run(cfg: Config, _use_gpu_diffusion: bool) {
 
     // Start with empty field — let boundary sources build gradients organically.
     // Pre-load only a thin boundary layer so initial cells can bootstrap.
-    init_field_boundaries(&mut field, &cfg.simulation);
+    let mut initial_stoich = writes_stoich_v2.then(StoichTickLedger::default);
+    init_field_boundaries_with_stoich(
+        &mut field,
+        &cfg.simulation,
+        initial_stoich.as_mut(),
+        cfg.output.write_stoich_v2_events,
+    );
 
     // Cell storage: Vec for contiguous iteration + HashMap for O(1) spatial lookup.
     // The map stores position -> index into the Vec.
@@ -188,7 +208,21 @@ pub fn run(cfg: Config, _use_gpu_diffusion: bool) {
         // === STEP 1: Boundary sources ===
         // Inject oxidant + carbon at top, reductant at bottom — the only
         // external energy inputs. Everything else is recycled by cells.
-        field.apply_boundary_sources(sim);
+        let mut tick_stoich = if tick == 0 {
+            initial_stoich.take().unwrap_or_default()
+        } else {
+            StoichTickLedger::default()
+        };
+
+        if writes_stoich_v2 {
+            field.apply_boundary_sources_with_stoich(
+                sim,
+                Some(&mut tick_stoich),
+                cfg.output.write_stoich_v2_events,
+            );
+        } else {
+            field.apply_boundary_sources(sim);
+        }
 
         // === STEP 2: Diffusion ===
         // Sub-stepped forward Euler on 3D Laplacian. CFL-stable because
@@ -201,6 +235,7 @@ pub fn run(cfg: Config, _use_gpu_diffusion: bool) {
                 pos[2] as usize * GRID_Y * GRID_X + pos[1] as usize * GRID_X + pos[0] as usize;
             occupancy[idx] = true;
         }
+        let field_totals_before_diffusion = writes_stoich_v2.then(|| field.species_totals());
         #[cfg(feature = "gpu")]
         if let Some(diffuser) = gpu_diffuser.as_mut() {
             if let Err(e) = diffuser.diffuse_tick_with_cells(&mut field, &occupancy, sim) {
@@ -215,19 +250,36 @@ pub fn run(cfg: Config, _use_gpu_diffusion: bool) {
         }
         #[cfg(not(feature = "gpu"))]
         field.diffuse_tick_with_cells(&occupancy, sim);
+        if let Some(before) = field_totals_before_diffusion {
+            record_diffusion_losses(
+                before,
+                field.species_totals(),
+                &mut tick_stoich,
+                cfg.output.write_stoich_v2_events,
+            );
+        }
 
         // === STEP 3: Light attenuation ===
         // Beer-Lambert top-down sweep. Light enters at z=0, attenuated by
         // cells and chemical absorbers. Stored per-voxel so photosynthesis
         // reactions can reference it as a catalyst.
         light.update(&field, &cell_map, sim);
+        if writes_stoich_v2 {
+            let total_light = light.data.iter().copied().sum::<f32>();
+            tick_stoich.record(
+                StoichRecord::new(
+                    StoichStage::Light,
+                    StoichEventKind::LightAvailability,
+                    total_light,
+                ),
+                cfg.output.write_stoich_v2_events,
+            );
+        }
 
         // === STEP 4: Cell update pass ===
         // Each cell runs the 5-phase tick (receptor, transport, reactions,
         // effector, fate) and returns field deltas + a fate event.
         let mut events: Vec<(usize, CellEvent)> = Vec::with_capacity(cells.len());
-        let mut tick_stoich = StoichTickLedger::default();
-
         for (i, cell) in cells.iter_mut().enumerate() {
             let p = cell.pos;
             // Cells sense the extracellular medium via empty neighbors,
@@ -236,20 +288,34 @@ pub fn run(cfg: Config, _use_gpu_diffusion: bool) {
             let l = light.get(p[0] as usize, p[1] as usize, p[2] as usize);
 
             let (deltas, event) = if writes_stoich {
-                cell.tick_with_stoich(&ext, l, sim, Some(&mut tick_stoich))
+                cell.tick_with_stoich(
+                    &ext,
+                    l,
+                    sim,
+                    Some(&mut tick_stoich),
+                    writes_stoich_v2,
+                    cfg.output.write_stoich_v2_events,
+                )
             } else {
                 cell.tick(&ext, l, sim)
             };
             // Secretion/consumption distributed to neighboring empty voxels
-            apply_deltas_to_neighbors(p, &mut field, &cell_map, &deltas);
-            events.push((i, event));
-        }
-
-        if writes_stoich {
-            stoich_run.add_tick(&tick_stoich);
-            if let Err(e) = logger.log_stoich_tick(tick as u64, &tick_stoich) {
-                eprintln!("Warning: failed to log stoichiometry tick {}: {}", tick, e);
+            if writes_stoich_v2 {
+                apply_deltas_to_neighbors_with_stoich(
+                    p,
+                    &mut field,
+                    &cell_map,
+                    &deltas,
+                    Some(&mut tick_stoich),
+                    cfg.output.write_stoich_v2_events,
+                    cell.lineage_id,
+                );
+            } else {
+                apply_deltas_to_neighbors_with_stoich(
+                    p, &mut field, &cell_map, &deltas, None, false, 0,
+                );
             }
+            events.push((i, event));
         }
 
         // === STEP 5: Process fate events ===
@@ -261,6 +327,7 @@ pub fn run(cfg: Config, _use_gpu_diffusion: bool) {
             match event {
                 CellEvent::Division => {
                     let parent = &cells[*i];
+                    let parent_lineage = parent.lineage_id;
                     if let Some(daughter_pos) = find_empty_neighbor_avoiding(
                         parent.pos,
                         &cell_map,
@@ -280,12 +347,38 @@ pub fn run(cfg: Config, _use_gpu_diffusion: bool) {
                             daughter.internal[k] *= 0.5;
                             cells[*i].internal[k] *= 0.5;
                         }
+                        if writes_stoich_v2 {
+                            tick_stoich.record(
+                                StoichRecord::new(
+                                    StoichStage::Division,
+                                    StoichEventKind::DivisionSplit,
+                                    0.0,
+                                )
+                                .actor(parent_lineage),
+                                cfg.output.write_stoich_v2_events,
+                            );
+                        }
                         daughter.ruleset.mutate(&mut rng, sim);
                         births.push(daughter);
                         tick_divisions += 1;
                     }
                 }
                 CellEvent::Death => {
+                    if writes_stoich_v2 {
+                        let cell = &cells[*i];
+                        let removed = internal_pool_delta(&cell.internal, -1.0);
+                        tick_stoich.record(
+                            StoichRecord::new(
+                                StoichStage::Death,
+                                StoichEventKind::DeathRemoval,
+                                removed.total_abs_sum(),
+                            )
+                            .model_delta(removed)
+                            .balancing_reservoir(StoichReservoir::RemovedBiomass)
+                            .actor(cell.lineage_id),
+                            cfg.output.write_stoich_v2_events,
+                        );
+                    }
                     deaths.push(*i);
                     tick_deaths += 1;
                 }
@@ -319,6 +412,18 @@ pub fn run(cfg: Config, _use_gpu_diffusion: bool) {
         }
 
         // === STEP 6: Data logging and periodic output ===
+        if writes_stoich {
+            stoich_run.add_tick(&tick_stoich);
+            if let Err(e) = logger.log_stoich_tick(tick as u64, &tick_stoich) {
+                eprintln!("Warning: failed to log stoichiometry tick {}: {}", tick, e);
+            }
+            if let Err(e) = logger.log_stoich_v2_events(tick as u64, &tick_stoich) {
+                eprintln!(
+                    "Warning: failed to log stoichiometry v2 events at tick {}: {}",
+                    tick, e
+                );
+            }
+        }
 
         // Optionally log every tick to ticks.csv (lightweight — just one CSV row)
         if let Err(e) = logger.log_tick(tick as u64, &cells, tick_divisions, tick_deaths) {
@@ -475,6 +580,21 @@ pub fn run(cfg: Config, _use_gpu_diffusion: bool) {
         }
     }
 
+    if cfg.output.write_stoich_v2_summary || cfg.simulation.stoich_enforcement.is_enabled() {
+        if let Err(e) = logger.write_stoich_v2_summary(
+            cfg.output.max_ticks,
+            effective_stoich_enforcement,
+            &stoich_run,
+        ) {
+            eprintln!("Warning: failed to write stoichiometry v2 summary: {}", e);
+        } else {
+            println!(
+                "Stoichiometry v2 summary written to {}/stoich_v2_summary.json",
+                cfg.output.output_dir
+            );
+        }
+    }
+
     // Write ancestry-colored XZ cross-section (red=photo, green=chemo, blue=anaerobe)
     if cfg.output.write_ancestry_map
         && let Err(e) = snapshot::write_ancestry_xz(
@@ -488,15 +608,47 @@ pub fn run(cfg: Config, _use_gpu_diffusion: bool) {
     }
 }
 
+fn record_diffusion_losses(
+    before: [f32; S_EXT],
+    after: [f32; S_EXT],
+    ledger: &mut StoichTickLedger,
+    keep_events: bool,
+) {
+    for species in 0..S_EXT {
+        let loss = (before[species] - after[species]).max(0.0);
+        if loss <= f32::EPSILON {
+            continue;
+        }
+        ledger.record(
+            StoichRecord::new(
+                StoichStage::DiffusionDecay,
+                StoichEventKind::DiffusionDecay,
+                loss,
+            )
+            .model_delta(external_delta(species, -loss))
+            .balancing_reservoir(StoichReservoir::AbioticDecaySink)
+            .species(species),
+            keep_events,
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{cadence_due, run, validate_run_config};
+    use marl_config::stoich::StoichEnforcement;
     use marl_config::{Config, SimulationConfig};
     use std::fs;
     use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn test_output_dir(name: &str) -> String {
-        let dir = std::env::temp_dir().join(name);
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let unique = format!("{}_{}_{}", name, std::process::id(), nanos);
+        let dir = std::env::temp_dir().join(unique);
         let _ = fs::remove_dir_all(&dir);
         dir.to_string_lossy().into_owned()
     }
@@ -554,8 +706,69 @@ mod tests {
 
         let summary = fs::read_to_string(dir.join("stoich_summary.json")).unwrap();
         assert!(summary.contains("\"gross_total_abs_sum\""));
+        let summary_json: serde_json::Value = serde_json::from_str(&summary).unwrap();
+        assert!(summary_json["ledger"]["reservoir_deltas"].is_null());
+        assert!(summary_json["ledger"]["stage_summaries"].is_null());
+        assert!(summary_json["ledger"]["strict_rejection_count"].is_null());
         let ticks = fs::read_to_string(dir.join("stoich_ticks.csv")).unwrap();
         assert!(ticks.contains("gross_material_abs,gross_total_abs"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn audit_stoich_v2_events_include_legacy_reactions() {
+        let out_dir = test_output_dir("marl_sim_audit_stoich_v2_event_test");
+        let mut cfg = Config::default();
+        cfg.simulation.stoich_enforcement = StoichEnforcement::Audit;
+        cfg.output.output_dir = out_dir.clone();
+        cfg.output.max_ticks = 1;
+        cfg.output.stats_interval = 0;
+        cfg.output.snapshot_interval = 0;
+        cfg.output.image_interval = 0;
+        cfg.output.seed_count = 1;
+        cfg.output.write_binary_field = false;
+        cfg.output.write_binary_cells = false;
+        cfg.output.write_stoich_v2_summary = true;
+        cfg.output.write_stoich_v2_events = true;
+        cfg.output.write_ancestry_map = false;
+        cfg.output.write_density_map = false;
+
+        run(cfg, false);
+
+        let dir = PathBuf::from(&out_dir);
+        let events = fs::read_to_string(dir.join("stoich_v2_events.csv")).unwrap();
+        assert!(events.contains(",reactions,legacy_reaction,"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn strict_stoich_run_writes_v2_outputs() {
+        let out_dir = test_output_dir("marl_sim_strict_stoich_output_test");
+        let mut cfg = Config::default();
+        cfg.simulation.stoich_enforcement = StoichEnforcement::Strict;
+        cfg.output.output_dir = out_dir.clone();
+        cfg.output.max_ticks = 1;
+        cfg.output.stats_interval = 0;
+        cfg.output.snapshot_interval = 0;
+        cfg.output.image_interval = 0;
+        cfg.output.seed_count = 1;
+        cfg.output.write_binary_field = false;
+        cfg.output.write_binary_cells = false;
+        cfg.output.write_stoich_v2_summary = false;
+        cfg.output.write_stoich_v2_events = true;
+        cfg.output.write_ancestry_map = false;
+        cfg.output.write_density_map = false;
+
+        run(cfg, false);
+
+        let dir = PathBuf::from(&out_dir);
+        let summary = fs::read_to_string(dir.join("stoich_v2_summary.json")).unwrap();
+        assert!(summary.contains("\"enforcement\": \"strict\""));
+        assert!(summary.contains("\"schema_version\": 2"));
+        let events = fs::read_to_string(dir.join("stoich_v2_events.csv")).unwrap();
+        assert!(events.contains("tick,stage,kind"));
 
         let _ = fs::remove_dir_all(&dir);
     }

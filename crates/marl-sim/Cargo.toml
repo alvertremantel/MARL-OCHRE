@@ -14,3 +14,6 @@ marl-field = { path = "../marl-field" }
 marl-output = { path = "../marl-output" }
 rand.workspace = true
 marl-gpu = { path = "../marl-gpu", optional = true }
+
+[dev-dependencies]
+serde_json.workspace = true

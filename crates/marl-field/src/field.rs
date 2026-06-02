@@ -1,3 +1,6 @@
+use marl_config::stoich::{
+    StoichEventKind, StoichRecord, StoichReservoir, StoichStage, StoichTickLedger, external_delta,
+};
 use marl_config::*;
 use rayon::prelude::*;
 
@@ -141,6 +144,16 @@ impl Field {
         let base = self.idx(x, y, z, 0);
         out.copy_from_slice(&self.data[base..base + S_EXT]);
         out
+    }
+
+    pub fn species_totals(&self) -> [f32; S_EXT] {
+        let mut totals = [0.0f32; S_EXT];
+        for voxel in self.data.chunks_exact(S_EXT) {
+            for s in 0..S_EXT {
+                totals[s] += voxel[s].max(0.0);
+            }
+        }
+        totals
     }
 
     /// Apply cell secretion/consumption deltas to a voxel
@@ -329,13 +342,30 @@ impl Field {
     /// Oxidant + carbon sourced from top (z=0), reductant from bottom (z=max).
     /// These are the only external inputs to the system — everything else is recycled.
     pub fn apply_boundary_sources(&mut self, sim: &SimulationConfig) {
+        self.apply_boundary_sources_with_stoich(sim, None, false);
+    }
+
+    pub fn apply_boundary_sources_with_stoich(
+        &mut self,
+        sim: &SimulationConfig,
+        mut stoich: Option<&mut StoichTickLedger>,
+        keep_events: bool,
+    ) {
         // Top face: oxidant (species 1) and carbon (species 3)
         for y in 0..GRID_Y {
             for x in 0..GRID_X {
                 let ox = self.get(x, y, 0, 1);
-                self.set(x, y, 0, 1, (ox + sim.source_rate_oxidant).min(sim.c_max));
+                let new_ox = (ox + sim.source_rate_oxidant).min(sim.c_max);
+                self.set(x, y, 0, 1, new_ox);
+                if let Some(ledger) = stoich.as_deref_mut() {
+                    record_boundary_source(ledger, 1, new_ox - ox, keep_events);
+                }
                 let ca = self.get(x, y, 0, 3);
-                self.set(x, y, 0, 3, (ca + sim.source_rate_carbon).min(sim.c_max));
+                let new_ca = (ca + sim.source_rate_carbon).min(sim.c_max);
+                self.set(x, y, 0, 3, new_ca);
+                if let Some(ledger) = stoich.as_deref_mut() {
+                    record_boundary_source(ledger, 3, new_ca - ca, keep_events);
+                }
             }
         }
 
@@ -344,10 +374,36 @@ impl Field {
             for x in 0..GRID_X {
                 let z = GRID_Z - 1;
                 let re = self.get(x, y, z, 2);
-                self.set(x, y, z, 2, (re + sim.source_rate_reductant).min(sim.c_max));
+                let new_re = (re + sim.source_rate_reductant).min(sim.c_max);
+                self.set(x, y, z, 2, new_re);
+                if let Some(ledger) = stoich.as_deref_mut() {
+                    record_boundary_source(ledger, 2, new_re - re, keep_events);
+                }
             }
         }
     }
+}
+
+fn record_boundary_source(
+    ledger: &mut StoichTickLedger,
+    species: usize,
+    amount: f32,
+    keep_events: bool,
+) {
+    if amount <= 0.0 {
+        return;
+    }
+    ledger.record(
+        StoichRecord::new(
+            StoichStage::BoundarySources,
+            StoichEventKind::BoundarySource,
+            amount,
+        )
+        .model_delta(external_delta(species, amount))
+        .balancing_reservoir(StoichReservoir::BoundaryInput)
+        .species(species),
+        keep_events,
+    );
 }
 
 impl Default for Field {

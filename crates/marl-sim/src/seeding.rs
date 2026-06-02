@@ -1,4 +1,7 @@
 use marl_cell::cell::CellState;
+use marl_config::stoich::{
+    StoichEventKind, StoichRecord, StoichReservoir, StoichStage, StoichTickLedger, external_delta,
+};
 use marl_config::{GRID_X, GRID_Y, GRID_Z, SimulationConfig};
 use marl_field::field::Field;
 use rand::Rng;
@@ -7,6 +10,15 @@ use std::collections::HashMap;
 /// Initialize field with thin boundary layers only.
 /// The bulk of the field starts empty — gradients build from boundary sources + diffusion.
 pub fn init_field_boundaries(field: &mut Field, sim: &SimulationConfig) {
+    init_field_boundaries_with_stoich(field, sim, None, false);
+}
+
+pub fn init_field_boundaries_with_stoich(
+    field: &mut Field,
+    sim: &SimulationConfig,
+    mut stoich: Option<&mut StoichTickLedger>,
+    keep_events: bool,
+) {
     // Prime only the boundary faces (configurable layers deep) so initial cells
     // have a local substrate source but the bulk field is empty.
     let layers = sim.boundary_prime_layers.min(GRID_Z);
@@ -15,14 +27,40 @@ pub fn init_field_boundaries(field: &mut Field, sim: &SimulationConfig) {
             // Top layers: some oxidant and carbon (atmosphere analog)
             for z in 0..layers {
                 field.set(x, y, z, 1, sim.boundary_prime_oxidant); // oxidant
+                if let Some(ledger) = stoich.as_deref_mut() {
+                    record_prime(ledger, 1, sim.boundary_prime_oxidant, keep_events);
+                }
                 field.set(x, y, z, 3, sim.boundary_prime_carbon); // carbon
+                if let Some(ledger) = stoich.as_deref_mut() {
+                    record_prime(ledger, 3, sim.boundary_prime_carbon, keep_events);
+                }
             }
             // Bottom layers: some reductant (geological source analog)
             for z in (GRID_Z - layers)..GRID_Z {
                 field.set(x, y, z, 2, sim.boundary_prime_reductant); // reductant
+                if let Some(ledger) = stoich.as_deref_mut() {
+                    record_prime(ledger, 2, sim.boundary_prime_reductant, keep_events);
+                }
             }
         }
     }
+}
+
+fn record_prime(ledger: &mut StoichTickLedger, species: usize, amount: f32, keep_events: bool) {
+    if amount <= 0.0 {
+        return;
+    }
+    ledger.record(
+        StoichRecord::new(
+            StoichStage::BoundaryPriming,
+            StoichEventKind::BoundaryPrime,
+            amount,
+        )
+        .model_delta(external_delta(species, amount))
+        .balancing_reservoir(StoichReservoir::BoundaryInput)
+        .species(species),
+        keep_events,
+    );
 }
 
 #[allow(clippy::too_many_arguments)]

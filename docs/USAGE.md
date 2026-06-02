@@ -197,6 +197,7 @@ Core physics and biology parameters:
 | `boundary_prime_oxidant` | f32 | 0.5 | Initial oxidant concentration in primed layers |
 | `boundary_prime_carbon` | f32 | 0.3 | Initial carbon concentration in primed layers |
 | `boundary_prime_reductant` | f32 | 0.5 | Initial reductant concentration in primed layers |
+| `stoich_enforcement` | enum | `"off"` | `"off"`, `"audit"`, or `"strict"` full-system stoichiometry policy |
 
 ### `[output]` section
 
@@ -220,6 +221,8 @@ Output cadence, directories, and format toggles:
 | `write_csv_snapshots` | bool | false | Write per-tick CSV snapshots |
 | `write_stoich_summary` | bool | false | Write end-of-run physical stoichiometry audit summary |
 | `write_stoich_tick_log` | bool | false | Write per-tick physical stoichiometry audit CSV |
+| `write_stoich_v2_summary` | bool | false | Write versioned full-system stoichiometry summary |
+| `write_stoich_v2_events` | bool | false | Write versioned full-system stoichiometry event CSV |
 | `xz_snapshot_species` | [usize] | [] | Species indices for XZ cross-section PPMs |
 | `xy_slice_depths_frac` | [f32] | [] | Fractional depths for XY slice PPMs |
 | `write_ancestry_map` | bool | false | Write ancestry-colored XZ PPMs |
@@ -247,6 +250,8 @@ Runs write into `output_dir` (default: `output/run_128x128x64`).
 | `ticks.csv` | `write_tick_log = true` | Per-tick population and z-layer counts |
 | `stoich_summary.json` | `write_stoich_summary = true` | End-of-run audit of legacy intracellular reactions, including gross imbalance totals and net signed deltas |
 | `stoich_ticks.csv` | `write_stoich_tick_log = true` | Per-tick stoichiometry audit totals with gross imbalance columns plus net signed deltas |
+| `stoich_v2_summary.json` | `write_stoich_v2_summary = true` or stoich enforcement enabled | Versioned full-system ledger with stage and reservoir totals |
+| `stoich_v2_events.csv` | `write_stoich_v2_events = true` | Per-event full-system stoichiometry rows |
 | `tick_<T>.ruleset_layers.bin.zst` | `ruleset_output_mode = "layer_averages"` or `"both"` | Per-z-layer continuous ruleset-parameter averages |
 | `tick_<T>.rulesets.bin.zst` | `ruleset_output_mode = "full"` or `"both"` | Deduplicated per-cell full ruleset dump with dictionary |
 | `chem_<tick>.csv` | `write_csv_snapshots = true` | Full field dump as CSV |
@@ -267,7 +272,9 @@ See [`docs/SCRIPTS.md`](SCRIPTS.md) for details.
 
 - `stoich_ticks.csv` columns: `reaction_count`, `active_flux`, `imbalanced_reaction_count`, `unknown_species_flux`, `carbon_to_energy_flux`, `reductant_to_energy_flux`, `gross_material_abs`, `gross_total_abs`, then net signed `delta_*` budget columns.
 - `stoich_summary.json` reports the same run-level ledger, with `material_abs_sum` as the gross material imbalance magnitude, `gross_total_abs_sum` as the gross material plus redox plus energy magnitude, and `net_material_abs_sum` as the final signed material imbalance after cancellation.
-- These audits currently cover legacy intracellular reactions only. Transport, maintenance, secretion, diffusion, decay, and cell fate bookkeeping remain outside this first audit pass.
+- v1 files cover legacy intracellular reactions. `stoich_v2_summary.json` and `stoich_v2_events.csv` cover boundary inputs, diffusion/decay, light availability, transport, spatial exchange, intracellular reactions, maintenance, effectors, division, and death.
+- `stoich_enforcement = "audit"` records the v2 ledger without changing dynamics. `stoich_enforcement = "strict"` keeps the feature opt-in, rejects unbalanced transport/effectors and untemplated active reactions, and closes modeled sources/sinks through explicit reservoirs.
+- Strict mode also constrains structural reaction mutations to the balanced template catalog, so strict evolutionary proposal distributions are intentionally different from legacy runs.
 
 ### Compression and viewer compatibility
 

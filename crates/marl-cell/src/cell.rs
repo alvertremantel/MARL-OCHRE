@@ -37,7 +37,11 @@
 //!    - Energy < quiescence_energy → go dormant (skip effectors)
 //!    - Otherwise → active
 
-use marl_config::stoich::StoichTickLedger;
+use marl_config::stoich::{
+    BALANCED_REACTION_TEMPLATES, LegacyReactionAudit, StoichEventKind, StoichRecord,
+    StoichReservoir, StoichStage, StoichTickLedger, balanced_template_for_reaction, internal_delta,
+    transfer_delta,
+};
 use marl_config::*;
 
 const LIGHT_SPECIES: usize = M_INT - 1;
@@ -200,7 +204,7 @@ impl CellState {
         light: f32,
         sim: &SimulationConfig,
     ) -> ([f32; S_EXT], CellEvent) {
-        self.tick_with_stoich(ext_conc, light, sim, None)
+        self.tick_with_stoich(ext_conc, light, sim, None, false, false)
     }
 
     pub fn tick_with_stoich(
@@ -209,6 +213,8 @@ impl CellState {
         light: f32,
         sim: &SimulationConfig,
         mut stoich: Option<&mut StoichTickLedger>,
+        record_full_stoich: bool,
+        keep_stoich_events: bool,
     ) -> ([f32; S_EXT], CellEvent) {
         let mut field_deltas = [0.0f32; S_EXT];
         // Cell tick runs once per full tick
@@ -256,12 +262,30 @@ impl CellState {
             let secretion_rate = tp.secrete_rate.max(0.0);
             let secretion = secretion_rate * internal_available / (1.0 + internal_available);
             let uptake = uptake_rate * ext_available / (1.0 + ext_available);
+            let uptake_request_amount = uptake * dt;
+            let secretion_request_amount = secretion * dt;
+            let requested_amount = uptake_request_amount + secretion_request_amount;
+            if sim.stoich_enforcement.is_strict()
+                && requested_amount > sim.active_reaction_threshold
+                && !transfer_delta(ext_idx, int_idx, 1.0).is_near_zero(1e-4)
+            {
+                if record_full_stoich && let Some(ledger) = stoich.as_deref_mut() {
+                    ledger.record_strict_rejection(
+                        StoichStage::CellTransport,
+                        requested_amount,
+                        self.lineage_id,
+                        marl_config::stoich::STRICT_TEMPLATE_NONE,
+                        keep_stoich_events,
+                    );
+                }
+                continue;
+            }
 
             valid_transport[i] = true;
             transport_ext[i] = ext_idx;
             transport_int[i] = int_idx;
-            secretion_request[i] = secretion * dt;
-            uptake_request[i] = uptake * dt;
+            secretion_request[i] = secretion_request_amount;
+            uptake_request[i] = uptake_request_amount;
             secretion_requested_by_int[int_idx] += secretion_request[i];
             uptake_requested_by_ext[ext_idx] += uptake_request[i];
         }
@@ -285,6 +309,22 @@ impl CellState {
             let amount = secretion_request[i] * secretion_scale_by_int[int_idx];
             accepted_secretion_by_int[int_idx] += amount;
             field_deltas[ext_idx] += amount;
+            if amount > 0.0
+                && record_full_stoich
+                && let Some(ledger) = stoich.as_deref_mut()
+            {
+                ledger.record(
+                    StoichRecord::new(
+                        StoichStage::CellTransport,
+                        StoichEventKind::Transport,
+                        amount,
+                    )
+                    .model_delta(transfer_delta(ext_idx, int_idx, -amount))
+                    .actor(self.lineage_id)
+                    .species(ext_idx),
+                    keep_stoich_events,
+                );
+            }
         }
 
         let mut uptake_scale_by_ext = [1.0f32; S_EXT];
@@ -329,6 +369,22 @@ impl CellState {
             let amount = provisional_uptake[i] * uptake_scale_by_int[int_idx];
             accepted_uptake_by_int[int_idx] += amount;
             field_deltas[ext_idx] -= amount;
+            if amount > 0.0
+                && record_full_stoich
+                && let Some(ledger) = stoich.as_deref_mut()
+            {
+                ledger.record(
+                    StoichRecord::new(
+                        StoichStage::CellTransport,
+                        StoichEventKind::Transport,
+                        amount,
+                    )
+                    .model_delta(transfer_delta(ext_idx, int_idx, amount))
+                    .actor(self.lineage_id)
+                    .species(ext_idx),
+                    keep_stoich_events,
+                );
+            }
         }
 
         for int_idx in 0..CHEMICAL_INT_SPECIES {
@@ -401,19 +457,51 @@ impl CellState {
             if flux <= 0.0 {
                 continue;
             }
+            let template = balanced_template_for_reaction(
+                rxn.substrate,
+                rxn.product,
+                rxn.catalyst,
+                rxn.cofactor,
+            );
+            if sim.stoich_enforcement.is_strict() && template.is_none() {
+                if let Some(ledger) = stoich.as_deref_mut() {
+                    ledger.record_strict_rejection(
+                        StoichStage::Reactions,
+                        flux,
+                        self.lineage_id,
+                        marl_config::stoich::STRICT_TEMPLATE_NONE,
+                        keep_stoich_events,
+                    );
+                }
+                continue;
+            }
+
             self.internal[sub_idx] -= flux;
             if let Some(cof_idx) = cof_idx {
                 self.internal[cof_idx] -= 0.5 * flux;
             }
             self.internal[prod_idx] += flux;
             if let Some(ledger) = stoich.as_deref_mut() {
-                ledger.record_legacy_reaction(
-                    rxn.substrate,
-                    rxn.product,
-                    rxn.catalyst,
-                    rxn.cofactor,
-                    flux,
-                );
+                if sim.stoich_enforcement.is_strict() {
+                    ledger.record_balanced_reaction(
+                        template.expect("strict mode template checked above"),
+                        flux,
+                        self.lineage_id,
+                        keep_stoich_events,
+                    );
+                } else {
+                    ledger.record_legacy_reaction(
+                        LegacyReactionAudit::new(
+                            rxn.substrate,
+                            rxn.product,
+                            rxn.catalyst,
+                            rxn.cofactor,
+                            flux,
+                        )
+                        .actor(self.lineage_id),
+                        keep_stoich_events,
+                    );
+                }
             }
         }
 
@@ -430,7 +518,26 @@ impl CellState {
             1.0
         };
         let maintenance_fraction = (sim.lambda_maintenance * prep_multiplier * dt).clamp(0.0, 1.0);
+        let energy_before_maintenance = self.internal[0];
         self.internal[0] *= 1.0 - maintenance_fraction;
+        let maintenance_loss = energy_before_maintenance - self.internal[0];
+        if record_full_stoich
+            && maintenance_loss > 0.0
+            && let Some(ledger) = stoich.as_deref_mut()
+        {
+            ledger.record(
+                StoichRecord::new(
+                    StoichStage::Maintenance,
+                    StoichEventKind::Maintenance,
+                    maintenance_loss,
+                )
+                .model_delta(internal_delta(0, -maintenance_loss))
+                .balancing_reservoir(StoichReservoir::HeatSink)
+                .actor(self.lineage_id)
+                .species(0),
+                keep_stoich_events,
+            );
+        }
 
         // Protein expression cost: each active enzyme requires transcription,
         // translation, and folding resources. No-op reactions (substrate == product)
@@ -441,8 +548,26 @@ impl CellState {
             .iter()
             .filter(|r| r.v_max.abs() > sim.active_reaction_threshold && r.substrate != r.product)
             .count();
-        self.internal[0] =
-            (self.internal[0] - active_rxn_count as f32 * sim.reaction_maintenance * dt).max(0.0);
+        let expression_loss =
+            (active_rxn_count as f32 * sim.reaction_maintenance * dt).min(self.internal[0]);
+        self.internal[0] = (self.internal[0] - expression_loss).max(0.0);
+        if record_full_stoich
+            && expression_loss > 0.0
+            && let Some(ledger) = stoich.as_deref_mut()
+        {
+            ledger.record(
+                StoichRecord::new(
+                    StoichStage::Maintenance,
+                    StoichEventKind::ExpressionMaintenance,
+                    expression_loss,
+                )
+                .model_delta(internal_delta(0, -expression_loss))
+                .balancing_reservoir(StoichReservoir::HeatSink)
+                .actor(self.lineage_id)
+                .species(0),
+                keep_stoich_events,
+            );
+        }
 
         // === PHASE 4: EFFECTOR PASS ===
         if !self.quiescent {
@@ -452,14 +577,44 @@ impl CellState {
                 if int_idx >= CHEMICAL_INT_SPECIES || ext_idx >= S_EXT {
                     continue;
                 }
-
                 if self.internal[int_idx] > eff.threshold {
                     let requested = eff.rate.max(0.0) * self.internal[int_idx]
                         / (1.0 + self.internal[int_idx])
                         * dt;
                     let amount = requested.min(self.internal[int_idx]);
+                    if sim.stoich_enforcement.is_strict()
+                        && amount > sim.active_reaction_threshold
+                        && !transfer_delta(ext_idx, int_idx, -1.0).is_near_zero(1e-4)
+                    {
+                        if record_full_stoich && let Some(ledger) = stoich.as_deref_mut() {
+                            ledger.record_strict_rejection(
+                                StoichStage::Effectors,
+                                amount,
+                                self.lineage_id,
+                                marl_config::stoich::STRICT_TEMPLATE_NONE,
+                                keep_stoich_events,
+                            );
+                        }
+                        continue;
+                    }
                     self.internal[int_idx] -= amount;
                     field_deltas[ext_idx] += amount;
+                    if record_full_stoich
+                        && amount > 0.0
+                        && let Some(ledger) = stoich.as_deref_mut()
+                    {
+                        ledger.record(
+                            StoichRecord::new(
+                                StoichStage::Effectors,
+                                StoichEventKind::Effector,
+                                amount,
+                            )
+                            .model_delta(transfer_delta(ext_idx, int_idx, -amount))
+                            .actor(self.lineage_id)
+                            .species(ext_idx),
+                            keep_stoich_events,
+                        );
+                    }
                 }
             }
         }
@@ -626,6 +781,18 @@ impl Ruleset {
             maybe_mutate(&mut self.reactions[i].k_m, rate, &normal, rng);
             maybe_mutate(&mut self.reactions[i].v_max, rate, &normal, rng);
             maybe_mutate(&mut self.reactions[i].k_cat, rate, &normal, rng);
+
+            if sim.stoich_enforcement.is_strict() {
+                if rng.random::<f32>() < rate * sim.structural_mutation_rate_mult {
+                    let template = BALANCED_REACTION_TEMPLATES
+                        [rng.random_range(0..BALANCED_REACTION_TEMPLATES.len())];
+                    self.reactions[i].substrate = template.substrate;
+                    self.reactions[i].product = template.product;
+                    self.reactions[i].catalyst = template.catalyst;
+                    self.reactions[i].cofactor = template.cofactor;
+                }
+                continue;
+            }
 
             // Structural mutation: copy topology from an existing active reaction
             // (gene duplication + divergence). Falls back to random if no active
@@ -967,7 +1134,7 @@ mod tests {
         let (plain_deltas, plain_event) = plain.tick(&[0.0; S_EXT], 0.0, &sim);
         let mut ledger = StoichTickLedger::default();
         let (audit_deltas, audit_event) =
-            audited.tick_with_stoich(&[0.0; S_EXT], 0.0, &sim, Some(&mut ledger));
+            audited.tick_with_stoich(&[0.0; S_EXT], 0.0, &sim, Some(&mut ledger), false, false);
 
         assert_eq!(plain.pos, audited.pos);
         assert_eq!(plain.lineage_id, audited.lineage_id);
@@ -1025,6 +1192,69 @@ mod tests {
         for e in &ruleset.effectors {
             assert!((e.int_species as usize) < LIGHT_SPECIES);
             assert!((e.ext_species as usize) < S_EXT);
+        }
+    }
+
+    #[test]
+    fn strict_mutation_uses_balanced_reaction_templates() {
+        let mut ruleset = test_ruleset();
+        ruleset.mutation_rate = 1.0;
+        let sim = SimulationConfig {
+            stoich_enforcement: marl_config::stoich::StoichEnforcement::Strict,
+            structural_mutation_rate_mult: 1.0,
+            ..SimulationConfig::default()
+        };
+        let mut rng = StdRng::seed_from_u64(17);
+
+        ruleset.mutate(&mut rng, &sim);
+
+        for reaction in &ruleset.reactions {
+            assert!(
+                balanced_template_for_reaction(
+                    reaction.substrate,
+                    reaction.product,
+                    reaction.catalyst,
+                    reaction.cofactor
+                )
+                .is_some()
+            );
+        }
+    }
+
+    #[test]
+    fn strict_partial_structural_mutation_preserves_balanced_templates() {
+        let mut ruleset = test_ruleset();
+        ruleset.mutation_rate = 1.0;
+        for (reaction, template) in ruleset
+            .reactions
+            .iter_mut()
+            .zip(BALANCED_REACTION_TEMPLATES.iter().cycle())
+        {
+            reaction.substrate = template.substrate;
+            reaction.product = template.product;
+            reaction.catalyst = template.catalyst;
+            reaction.cofactor = template.cofactor;
+            reaction.v_max = 1.0;
+        }
+        let sim = SimulationConfig {
+            stoich_enforcement: marl_config::stoich::StoichEnforcement::Strict,
+            structural_mutation_rate_mult: 0.35,
+            ..SimulationConfig::default()
+        };
+        let mut rng = StdRng::seed_from_u64(301);
+
+        ruleset.mutate(&mut rng, &sim);
+
+        for reaction in &ruleset.reactions {
+            assert!(
+                balanced_template_for_reaction(
+                    reaction.substrate,
+                    reaction.product,
+                    reaction.catalyst,
+                    reaction.cofactor
+                )
+                .is_some()
+            );
         }
     }
 }

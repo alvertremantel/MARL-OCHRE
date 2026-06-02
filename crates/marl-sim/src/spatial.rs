@@ -1,3 +1,6 @@
+use marl_config::stoich::{
+    StoichEventKind, StoichRecord, StoichReservoir, StoichStage, StoichTickLedger, external_delta,
+};
 use marl_config::{GRID_X, GRID_Y, GRID_Z, S_EXT, SimulationConfig};
 use marl_field::field::Field;
 use rand::Rng;
@@ -95,10 +98,41 @@ pub fn apply_deltas_to_neighbors(
     field: &mut Field,
     cell_map: &HashMap<[u16; 3], usize>,
     deltas: &[f32; S_EXT],
-) {
+) -> [f32; S_EXT] {
+    apply_deltas_to_neighbors_with_stoich(pos, field, cell_map, deltas, None, false, 0)
+}
+
+pub fn apply_deltas_to_neighbors_with_stoich(
+    pos: [u16; 3],
+    field: &mut Field,
+    cell_map: &HashMap<[u16; 3], usize>,
+    deltas: &[f32; S_EXT],
+    mut stoich: Option<&mut StoichTickLedger>,
+    keep_events: bool,
+    actor_id: u64,
+) -> [f32; S_EXT] {
+    let mut accepted = [0.0f32; S_EXT];
     let (neighbors, count) = collect_empty_neighbors(pos, cell_map, None);
     if count == 0 {
-        return; // enclosed cell — deltas are lost
+        for (species, delta) in deltas.iter().enumerate() {
+            if *delta != 0.0
+                && let Some(ledger) = stoich.as_deref_mut()
+            {
+                ledger.record(
+                    StoichRecord::new(
+                        StoichStage::SpatialExchange,
+                        StoichEventKind::ClampLoss,
+                        delta.abs(),
+                    )
+                    .model_delta(external_delta(species, -*delta))
+                    .balancing_reservoir(StoichReservoir::ClampLoss)
+                    .actor(actor_id)
+                    .species(species),
+                    keep_events,
+                );
+            }
+        }
+        return accepted; // enclosed cell — deltas are lost
     }
     for s in 0..S_EXT {
         let delta = deltas[s];
@@ -117,6 +151,7 @@ pub fn apply_deltas_to_neighbors(
                     &split_deltas,
                 );
             }
+            accepted[s] += delta;
             continue;
         }
 
@@ -148,7 +183,29 @@ pub fn apply_deltas_to_neighbors(
                 &split_deltas,
             );
         }
+        accepted[s] -= requested;
     }
+    if let Some(ledger) = stoich {
+        for s in 0..S_EXT {
+            let actual = accepted[s];
+            let lost = deltas[s] - actual;
+            if lost.abs() > f32::EPSILON {
+                ledger.record(
+                    StoichRecord::new(
+                        StoichStage::SpatialExchange,
+                        StoichEventKind::ClampLoss,
+                        lost.abs(),
+                    )
+                    .model_delta(external_delta(s, -lost))
+                    .balancing_reservoir(StoichReservoir::ClampLoss)
+                    .actor(actor_id)
+                    .species(s),
+                    keep_events,
+                );
+            }
+        }
+    }
+    accepted
 }
 
 /// Find an empty voxel `division_neighbor_distance` steps away along a face axis.
@@ -254,6 +311,47 @@ mod tests {
 
         assert_eq!(field.get(11, 10, 10, 1), 0.0);
         assert!((field.get(9, 10, 10, 1) - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn enclosed_exchange_records_balanced_clamp_loss_without_field_change() {
+        let mut field = Field::new();
+        let center = [10, 10, 10];
+        let cell_map = HashMap::from([
+            (center, 0),
+            ([11, 10, 10], 1),
+            ([9, 10, 10], 2),
+            ([10, 11, 10], 3),
+            ([10, 9, 10], 4),
+            ([10, 10, 11], 5),
+            ([10, 10, 9], 6),
+        ]);
+        let mut deltas = [0.0f32; S_EXT];
+        deltas[4] = 1.25;
+        let mut ledger = StoichTickLedger::default();
+
+        let accepted = apply_deltas_to_neighbors_with_stoich(
+            center,
+            &mut field,
+            &cell_map,
+            &deltas,
+            Some(&mut ledger),
+            true,
+            42,
+        );
+
+        assert_eq!(accepted[4], 0.0);
+        assert_eq!(field.get(11, 10, 10, 4), 0.0);
+        assert_eq!(ledger.events.len(), 1);
+        let event = &ledger.events[0];
+        assert_eq!(event.kind, StoichEventKind::ClampLoss);
+        assert!(event.balanced);
+        assert!(
+            event
+                .residual
+                .is_near_zero(marl_config::stoich::STOICH_TOLERANCE)
+        );
+        assert!(event.reservoir_delta.total_abs_sum() > 0.0);
     }
 
     #[test]

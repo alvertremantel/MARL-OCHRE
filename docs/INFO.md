@@ -274,8 +274,8 @@ The project is in a good prototype state. It is not a toy, but it is also not ye
 Several current simplifications matter if this code is used for serious experimental interpretation.
 
 - Bookkeeping conservation is enforced in the current cell update path: accepted uptake, secretion, reaction flux, cofactor consumption, and division splits are bounded by available pools.
-- Physical stoichiometry is audited, not enforced. Optional `stoich_summary.json` and `stoich_ticks.csv` outputs report C/H/O/S-style material, redox, and energy-equivalent imbalances for legacy reactions.
-- Strict balanced-reaction enforcement is still future work; current starter metabolisms remain abstract and comparable to prior runs unless stoichiometry outputs are enabled.
+- Physical stoichiometry has two output layers. The v1 `stoich_summary.json` and `stoich_ticks.csv` files remain a legacy-reaction audit. The v2 `stoich_v2_summary.json` and `stoich_v2_events.csv` files audit accepted full-system fluxes across boundary inputs, diffusion/decay, spatial exchange, transport, reactions, maintenance, effectors, division, death, and light availability.
+- Strict stoichiometry is opt-in via `stoich_enforcement = "strict"`. Strict mode rejects unbalanced transport/effectors and active reactions that do not match a balanced template catalog, while explicit reservoirs close modeled sources and sinks without adding new species slots.
 - Dead cells are removed; their internals are not lysed back into the field.
 - Quiescence is partial rather than a deep dormancy mode.
 - Cells are updated sequentially with immediate field writes inside each tick.
