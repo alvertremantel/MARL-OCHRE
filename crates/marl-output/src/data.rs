@@ -18,7 +18,7 @@
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{BufWriter, Result, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use marl_cell::cell::*;
 use marl_config::*;
@@ -95,7 +95,7 @@ impl ReactionRegistry {
 
     /// Write the full registry to `reaction_registry.csv` in the output dir.
     /// Called at end of run so the CLI tool can decode IDs back to topologies.
-    pub fn write_registry(&self, output_dir: &PathBuf) -> Result<()> {
+    pub fn write_registry(&self, output_dir: &Path) -> Result<()> {
         let path = output_dir.join("reaction_registry.csv");
         let file = File::create(&path)?;
         let mut w = BufWriter::new(file);
@@ -111,6 +111,12 @@ impl ReactionRegistry {
             )?;
         }
         w.flush()
+    }
+}
+
+impl Default for ReactionRegistry {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -265,8 +271,8 @@ impl DataLogger {
         )?;
 
         // Write per-z-layer cell counts.
-        for z in 0..GRID_Z {
-            write!(writer, ",{}", z_counts[z])?;
+        for count in z_counts.iter().take(GRID_Z) {
+            write!(writer, ",{count}")?;
         }
         writeln!(writer)?;
 
@@ -464,6 +470,7 @@ impl DataLogger {
     /// - `light`           — the light attenuation field at end of run
     /// - `total_divisions` — cumulative division events over the whole run
     /// - `total_deaths`    — cumulative death events over the whole run
+    #[allow(clippy::too_many_arguments)]
     pub fn write_summary(
         &self,
         total_ticks: u32,
@@ -562,8 +569,8 @@ impl DataLogger {
         writeln!(w)?;
         writeln!(w, "| z | cells |")?;
         writeln!(w, "|---|-------|")?;
-        for z in 0..GRID_Z {
-            writeln!(w, "| {} | {} |", z, z_counts[z])?;
+        for (z, count) in z_counts.iter().enumerate().take(GRID_Z) {
+            writeln!(w, "| {z} | {count} |")?;
         }
         writeln!(w)?;
 

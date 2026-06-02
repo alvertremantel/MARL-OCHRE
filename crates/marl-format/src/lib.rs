@@ -259,24 +259,31 @@ impl RunMeta {
                 BINARY_COMPRESSION_NONE, BINARY_COMPRESSION_ZSTD, self.binary_compression
             )));
         }
-        if self.field_file_pattern.is_empty() {
-            return Err(FormatError::new("field_file_pattern must not be empty"));
-        }
-        if self.cell_file_pattern.is_empty() {
-            return Err(FormatError::new("cell_file_pattern must not be empty"));
-        }
+        validate_snapshot_pattern("field_file_pattern", &self.field_file_pattern)?;
+        validate_snapshot_pattern("cell_file_pattern", &self.cell_file_pattern)?;
         if let Some(expected_len) =
             field_byte_len(self.grid_x, self.grid_y, self.grid_z, self.s_ext)
+            && self.field_byte_len != expected_len
         {
-            if self.field_byte_len != expected_len {
-                return Err(FormatError::new(format!(
-                    "field_byte_len mismatch: expected {}, got {}",
-                    expected_len, self.field_byte_len
-                )));
-            }
+            return Err(FormatError::new(format!(
+                "field_byte_len mismatch: expected {}, got {}",
+                expected_len, self.field_byte_len
+            )));
         }
         Ok(())
     }
+}
+
+fn validate_snapshot_pattern(name: &str, pattern: &str) -> Result<(), FormatError> {
+    if pattern.is_empty() {
+        return Err(FormatError::new(format!("{name} must not be empty")));
+    }
+    if pattern.matches("<T>").count() != 1 {
+        return Err(FormatError::new(format!(
+            "{name} must contain exactly one <T> tick placeholder"
+        )));
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -295,7 +302,7 @@ pub fn field_byte_len(grid_x: u32, grid_y: u32, grid_z: u32, s_ext: u32) -> Opti
         .checked_mul(u64::from(grid_y))?
         .checked_mul(u64::from(grid_z))?
         .checked_mul(u64::from(s_ext))?;
-    Some(count.checked_mul(4)?)
+    count.checked_mul(4)
 }
 
 /// Compute the number of `f32` averages stored in one per-layer ruleset record.
@@ -306,14 +313,12 @@ pub fn ruleset_layer_value_count(
     r_max: u32,
     s_effectors: u32,
 ) -> Option<u32> {
-    Some(
-        s_receptors
-            .checked_mul(3)?
-            .checked_add(s_transporters.checked_mul(2)?)?
-            .checked_add(r_max.checked_mul(3)?)?
-            .checked_add(s_effectors.checked_mul(2)?)?
-            .checked_add(6)?,
-    )
+    s_receptors
+        .checked_mul(3)?
+        .checked_add(s_transporters.checked_mul(2)?)?
+        .checked_add(r_max.checked_mul(3)?)?
+        .checked_add(s_effectors.checked_mul(2)?)?
+        .checked_add(6)
 }
 
 /// Compute the byte stride of one per-layer ruleset average record.
@@ -450,6 +455,24 @@ mod tests {
         meta.binary_compression = "brotli".to_string();
         let err = meta.validate().unwrap_err();
         assert!(err.message.contains("binary_compression"));
+    }
+
+    #[test]
+    fn test_run_meta_validate_bad_snapshot_pattern() {
+        let mut meta = RunMeta::new(128, 128, 64, 12, 8, true, true);
+        meta.field_file_pattern = "latest.field.bin".to_string();
+        let err = meta.validate().unwrap_err();
+        assert!(err.message.contains("field_file_pattern"));
+
+        let mut meta = RunMeta::new(128, 128, 64, 12, 8, true, true);
+        meta.cell_file_pattern = "latest.cells.bin".to_string();
+        let err = meta.validate().unwrap_err();
+        assert!(err.message.contains("cell_file_pattern"));
+
+        let mut meta = RunMeta::new(128, 128, 64, 12, 8, true, true);
+        meta.field_file_pattern = "tick_<T>_<T>.field.bin".to_string();
+        let err = meta.validate().unwrap_err();
+        assert!(err.message.contains("exactly one <T>"));
     }
 
     #[test]

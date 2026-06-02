@@ -13,7 +13,7 @@ use marl_format::{
 use serde::Serialize;
 use std::collections::HashMap;
 use std::fs::{self, File};
-use std::io::{BufWriter, Write};
+use std::io::{BufWriter, Error, ErrorKind, Write};
 use std::mem;
 use std::path::{Path, PathBuf};
 
@@ -96,7 +96,7 @@ fn write_binary_payload(path: &Path, payload: &[u8], out: &OutputConfig) -> std:
                 writer.flush()?;
             }
         }
-        fs::rename(&temp_path, path)?;
+        commit_temp_path(&temp_path, path)?;
         Ok(())
     })();
 
@@ -104,6 +104,17 @@ fn write_binary_payload(path: &Path, payload: &[u8], out: &OutputConfig) -> std:
         let _ = fs::remove_file(&temp_path);
     }
     result
+}
+
+fn commit_temp_path(temp_path: &Path, path: &Path) -> std::io::Result<()> {
+    match fs::rename(temp_path, path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == ErrorKind::AlreadyExists => {
+            fs::remove_file(path)?;
+            fs::rename(temp_path, path)
+        }
+        Err(err) => Err(err),
+    }
 }
 
 pub fn write_field_dump(field: &Field, tick: u64, out: &OutputConfig) -> std::io::Result<()> {
@@ -280,11 +291,19 @@ pub fn write_ruleset_full_dump(
     fs::create_dir_all(&out.output_dir)?;
 
     let ruleset_byte_size = RULESET_FULL_CANONICAL_SIZE;
-    let cell_count = cells.len() as u32;
+    let cell_count = u32::try_from(cells.len()).map_err(|_| {
+        Error::new(
+            ErrorKind::InvalidInput,
+            "too many cells to encode in full ruleset dump",
+        )
+    })?;
 
     // Build deduplicated dictionary: canonical bytes → dict_id
     let mut dict: HashMap<[u8; RULESET_FULL_CANONICAL_SIZE as usize], u32> = HashMap::new();
-    let mut cell_refs: Vec<u8> = Vec::with_capacity(cell_count as usize * 10);
+    let cell_refs_capacity = (cell_count as usize)
+        .checked_mul(RULESET_FULL_CELL_REF_STRIDE as usize)
+        .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "cell refs size overflow"))?;
+    let mut cell_refs: Vec<u8> = Vec::with_capacity(cell_refs_capacity);
 
     for cell in cells {
         let canonical = ruleset_to_canonical_bytes(&cell.ruleset);
@@ -300,8 +319,19 @@ pub fn write_ruleset_full_dump(
     let dict_count = dict.len() as u32;
 
     // Assemble payload: header + dictionary + cell refs
-    let dict_storage_size = dict_count.checked_mul(ruleset_byte_size).unwrap_or(0) as usize;
-    let total = RULESET_FULL_HEADER_SIZE as usize + dict_storage_size + cell_refs.len();
+    let dict_storage_size = dict_count
+        .checked_mul(ruleset_byte_size)
+        .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "ruleset dictionary size overflow"))?
+        as usize;
+    let total = (RULESET_FULL_HEADER_SIZE as usize)
+        .checked_add(dict_storage_size)
+        .and_then(|v| v.checked_add(cell_refs.len()))
+        .ok_or_else(|| {
+            Error::new(
+                ErrorKind::InvalidInput,
+                "full ruleset payload size overflow",
+            )
+        })?;
     let mut payload = Vec::with_capacity(total);
 
     // Header
@@ -430,6 +460,8 @@ pub fn write_run_meta(out: &OutputConfig) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::field_reassign_with_default)]
+
     use super::*;
     use marl_cell::cell::{
         EffectorParams, FateParams, Reaction, ReceptorParams, Ruleset, TransportParams,
@@ -529,6 +561,21 @@ mod tests {
         assert_eq!(&bytes[12..20], &0x0102_0304_0506_0708u64.to_le_bytes());
         assert_eq!(bytes[20], 2);
         assert_eq!(&bytes[21..25], &4.5f32.to_le_bytes());
+    }
+
+    #[test]
+    fn commit_temp_path_replaces_existing_file() {
+        let out_dir = test_output_dir("marl_output_commit_replace_test");
+        fs::create_dir_all(&out_dir).unwrap();
+        let path = Path::new(&out_dir).join("payload.bin");
+        let temp_path = Path::new(&out_dir).join("payload.bin.tmp");
+        fs::write(&path, b"old").unwrap();
+        fs::write(&temp_path, b"new").unwrap();
+
+        commit_temp_path(&temp_path, &path).unwrap();
+
+        assert_eq!(fs::read(&path).unwrap(), b"new");
+        assert!(!temp_path.exists());
     }
 
     #[test]

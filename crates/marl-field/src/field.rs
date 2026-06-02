@@ -1,6 +1,96 @@
 use marl_config::*;
 use rayon::prelude::*;
 
+const GRID_SIZE: usize = GRID_X * GRID_Y * GRID_Z;
+const EXPLICIT_DIFFUSION_CFL_LIMIT: f32 = 1.0 / 6.0;
+const MAX_DIFFUSION_SUBSTEPS: usize = 100_000;
+
+pub fn validate_diffusion_config(sim: &SimulationConfig) -> Result<(), String> {
+    if !sim.dt.is_finite() || sim.dt < 0.0 {
+        return Err(format!("dt must be finite and nonnegative, got {}", sim.dt));
+    }
+    if !sim.alpha_eps.is_finite() || sim.alpha_eps < 0.0 {
+        return Err(format!(
+            "alpha_eps must be finite and nonnegative, got {}",
+            sim.alpha_eps
+        ));
+    }
+    if !sim.k_eps.is_finite() || sim.k_eps <= 0.0 {
+        return Err(format!(
+            "k_eps must be finite and positive, got {}",
+            sim.k_eps
+        ));
+    }
+    for (index, &d) in sim.d_voxel.iter().enumerate() {
+        if !d.is_finite() || d < 0.0 {
+            return Err(format!(
+                "d_voxel[{index}] must be finite and nonnegative, got {d}"
+            ));
+        }
+    }
+    for (index, &decay) in sim.lambda_decay.iter().enumerate() {
+        if !decay.is_finite() || decay < 0.0 {
+            return Err(format!(
+                "lambda_decay[{index}] must be finite and nonnegative, got {decay}"
+            ));
+        }
+    }
+
+    let required = required_stable_substeps(sim);
+    if required > MAX_DIFFUSION_SUBSTEPS {
+        return Err(format!(
+            "diffusion requires {required} substeps, above maximum {MAX_DIFFUSION_SUBSTEPS}"
+        ));
+    }
+
+    Ok(())
+}
+
+/// Minimum number of explicit substeps needed for the configured diffusion and
+/// decay rates.
+///
+/// Diffusion coefficients are already expressed in voxel units, so the 3D
+/// forward-Euler stability bound is `dt_sub * max(D) <= 1/6`. Explicit decay
+/// also needs `dt_sub * max(lambda_decay) <= 1` to avoid clamping through zero.
+pub fn stable_diffusion_substeps(sim: &SimulationConfig) -> usize {
+    if sim.diffusion_substeps == 0 {
+        return 0;
+    }
+
+    let required = required_stable_substeps(sim).min(MAX_DIFFUSION_SUBSTEPS);
+    sim.diffusion_substeps.max(required.max(1))
+}
+
+fn required_stable_substeps(sim: &SimulationConfig) -> usize {
+    let max_d = sim
+        .d_voxel
+        .iter()
+        .copied()
+        .filter(|d| d.is_finite())
+        .fold(0.0f32, f32::max)
+        .max(0.0);
+    let max_decay = sim
+        .lambda_decay
+        .iter()
+        .copied()
+        .filter(|decay| decay.is_finite())
+        .fold(0.0f32, f32::max)
+        .max(0.0);
+    if (max_d == 0.0 && max_decay == 0.0) || sim.dt <= 0.0 || !sim.dt.is_finite() {
+        return 1;
+    }
+
+    let diffusion_required =
+        (sim.dt as f64 * max_d as f64 / EXPLICIT_DIFFUSION_CFL_LIMIT as f64).ceil();
+    let decay_required = (sim.dt as f64 * max_decay as f64).ceil();
+    let required = diffusion_required.max(decay_required);
+    if !required.is_finite() || required > usize::MAX as f64 {
+        usize::MAX
+    } else {
+        required as usize
+    }
+}
+
 /// 3D chemical concentration field.
 ///
 /// Stores concentrations of all S_EXT chemical species at every voxel in
@@ -56,8 +146,8 @@ impl Field {
     /// Apply cell secretion/consumption deltas to a voxel
     pub fn apply_deltas(&mut self, x: usize, y: usize, z: usize, deltas: &[f32; S_EXT]) {
         let base = self.idx(x, y, z, 0);
-        for s in 0..S_EXT {
-            self.data[base + s] = (self.data[base + s] + deltas[s]).max(0.0);
+        for (s, delta) in deltas.iter().enumerate() {
+            self.data[base + s] = (self.data[base + s] + *delta).max(0.0);
         }
     }
 
@@ -71,6 +161,13 @@ impl Field {
     #[inline]
     fn get_from(src: &[f32], x: usize, y: usize, z: usize, s: usize) -> f32 {
         src[Self::idx_static(x, y, z, s)]
+    }
+
+    #[inline]
+    fn niche_factor(structural: f32, sim: &SimulationConfig) -> f32 {
+        let structural = structural.max(0.0);
+        let denom = (sim.k_eps + structural).max(f32::EPSILON);
+        (1.0 - sim.alpha_eps.max(0.0) * structural / denom).clamp(0.0, 1.0)
     }
 
     /// Run one diffusion substep for all species, parallelized over z-layers.
@@ -121,7 +218,7 @@ impl Field {
                 for y in 0..GRID_Y {
                     for x in 0..GRID_X {
                         let occ_here =
-                            occupancy.map_or(false, |o| o[z * voxel_layer_size + y * GRID_X + x]);
+                            occupancy.is_some_and(|o| o[z * voxel_layer_size + y * GRID_X + x]);
 
                         // Occupied voxels are excluded from diffusion entirely.
                         // Their field concentrations are meaningless (chemicals
@@ -135,63 +232,49 @@ impl Field {
                             continue;
                         }
 
-                        // --- Empty voxel: compute diffusion normally ---
+                        // --- Empty voxel: compute conservative face fluxes ---
 
-                        // Niche construction: EPS deposits slow diffusion locally
-                        let structural = Self::get_from(src, x, y, z, 7);
-                        let niche_factor =
-                            1.0 - sim.alpha_eps * structural / (sim.k_eps + structural);
+                        let base = (y * GRID_X + x) * S_EXT;
+                        let center_idx = Self::idx_static(x, y, z, 0);
+                        let niche_here = Self::niche_factor(src[center_idx + 7], sim);
 
-                        // Check which neighbors are occupied or walls.
-                        // Occupied neighbors are treated identically to walls:
-                        // Neumann BC (zero flux) by substituting center value.
+                        // Check which neighbors are occupied or walls once per voxel.
+                        // Walls and occupied neighbors are zero-flux faces.
                         let occ_check = |nx: usize, ny: usize, nz: usize| -> bool {
-                            occupancy.map_or(false, |o| o[nz * voxel_layer_size + ny * GRID_X + nx])
+                            occupancy.is_some_and(|o| o[nz * voxel_layer_size + ny * GRID_X + nx])
+                        };
+                        let neighbor = |nx: usize, ny: usize, nz: usize| {
+                            if occ_check(nx, ny, nz) {
+                                None
+                            } else {
+                                let idx = Self::idx_static(nx, ny, nz, 0);
+                                Some((idx, Self::niche_factor(src[idx + 7], sim)))
+                            }
                         };
 
+                        let xm = (x > 0).then(|| neighbor(x - 1, y, z)).flatten();
+                        let xp = (x + 1 < GRID_X).then(|| neighbor(x + 1, y, z)).flatten();
+                        let ym = (y > 0).then(|| neighbor(x, y - 1, z)).flatten();
+                        let yp = (y + 1 < GRID_Y).then(|| neighbor(x, y + 1, z)).flatten();
+                        let zm = (z > 0).then(|| neighbor(x, y, z - 1)).flatten();
+                        let zp = (z + 1 < GRID_Z).then(|| neighbor(x, y, z + 1)).flatten();
+                        let neighbors = [xm, xp, ym, yp, zm, zp];
+
                         for s in 0..S_EXT {
-                            let c = Self::get_from(src, x, y, z, s);
-                            let d = sim.d_voxel[s] * niche_factor;
-
-                            // 6-neighbor Laplacian. Walls AND occupied neighbors
-                            // both get Neumann treatment (use center value c).
-                            let xm = if x == 0 || occ_check(x - 1, y, z) {
-                                c
-                            } else {
-                                Self::get_from(src, x - 1, y, z, s)
-                            };
-                            let xp = if x >= GRID_X - 1 || occ_check(x + 1, y, z) {
-                                c
-                            } else {
-                                Self::get_from(src, x + 1, y, z, s)
-                            };
-                            let ym = if y == 0 || occ_check(x, y - 1, z) {
-                                c
-                            } else {
-                                Self::get_from(src, x, y - 1, z, s)
-                            };
-                            let yp = if y >= GRID_Y - 1 || occ_check(x, y + 1, z) {
-                                c
-                            } else {
-                                Self::get_from(src, x, y + 1, z, s)
-                            };
-                            let zm = if z == 0 || occ_check(x, y, z - 1) {
-                                c
-                            } else {
-                                Self::get_from(src, x, y, z - 1, s)
-                            };
-                            let zp = if z >= GRID_Z - 1 || occ_check(x, y, z + 1) {
-                                c
-                            } else {
-                                Self::get_from(src, x, y, z + 1, s)
-                            };
-
-                            let laplacian = xm + xp + ym + yp + zm + zp - 6.0 * c;
+                            let c = src[center_idx + s];
+                            let base_d = sim.d_voxel[s].max(0.0);
+                            let diffusion = neighbors
+                                .iter()
+                                .flatten()
+                                .map(|&(neighbor_idx, niche_neighbor)| {
+                                    let d_face = 0.5 * base_d * (niche_here + niche_neighbor);
+                                    d_face * (src[neighbor_idx + s] - c)
+                                })
+                                .sum::<f32>();
                             let decay = sim.lambda_decay[s] * c;
-                            let new_c = c + dt_sub * (d * laplacian - decay);
+                            let new_c = c + dt_sub * (diffusion - decay);
 
-                            let local_idx = (y * GRID_X + x) * S_EXT + s;
-                            dst_layer[local_idx] = new_c.max(0.0);
+                            dst_layer[base + s] = new_c.max(0.0);
                         }
                     }
                 }
@@ -210,8 +293,19 @@ impl Field {
     /// the liquid phase. Interior cells in a dense colony are cut off
     /// from nutrients, creating natural carrying capacity.
     pub fn diffuse_tick_with_cells(&mut self, occupancy: &[bool], sim: &SimulationConfig) {
-        let dt_sub = sim.dt / sim.diffusion_substeps as f32;
-        for _ in 0..sim.diffusion_substeps {
+        validate_diffusion_config(sim).expect("invalid diffusion configuration");
+        assert_eq!(
+            occupancy.len(),
+            GRID_SIZE,
+            "occupancy length must match GRID_X * GRID_Y * GRID_Z"
+        );
+        let substeps = stable_diffusion_substeps(sim);
+        if substeps == 0 {
+            return;
+        }
+
+        let dt_sub = sim.dt / substeps as f32;
+        for _ in 0..substeps {
             self.diffusion_step_inner(dt_sub, Some(occupancy), sim);
         }
     }
@@ -219,8 +313,14 @@ impl Field {
     #[allow(dead_code)] // TODO: occupancy-free version kept for testing/benchmarking
     /// Run a full tick of diffusion (multiple substeps for stability)
     pub fn diffuse_tick(&mut self, sim: &SimulationConfig) {
-        let dt_sub = sim.dt / sim.diffusion_substeps as f32;
-        for _ in 0..sim.diffusion_substeps {
+        validate_diffusion_config(sim).expect("invalid diffusion configuration");
+        let substeps = stable_diffusion_substeps(sim);
+        if substeps == 0 {
+            return;
+        }
+
+        let dt_sub = sim.dt / substeps as f32;
+        for _ in 0..substeps {
             self.diffusion_step_inner(dt_sub, None, sim);
         }
     }
@@ -250,6 +350,12 @@ impl Field {
     }
 }
 
+impl Default for Field {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -267,10 +373,104 @@ mod tests {
         }
     }
 
+    fn conservative_sim(species: usize, d: f32) -> SimulationConfig {
+        let mut d_voxel = [0.0; S_EXT];
+        d_voxel[species] = d;
+        SimulationConfig {
+            diffusion_substeps: 1,
+            d_voxel,
+            lambda_decay: [0.0; S_EXT],
+            ..Default::default()
+        }
+    }
+
+    fn total_species(field: &Field, species: usize) -> f64 {
+        field
+            .data
+            .chunks_exact(S_EXT)
+            .map(|voxel| voxel[species] as f64)
+            .sum()
+    }
+
+    #[test]
+    fn stable_substeps_enforce_explicit_diffusion_bound() {
+        let mut d_voxel = [0.0; S_EXT];
+        d_voxel[1] = 1.5;
+        let sim = SimulationConfig {
+            diffusion_substeps: 1,
+            dt: 1.0,
+            d_voxel,
+            ..Default::default()
+        };
+
+        assert_eq!(stable_diffusion_substeps(&sim), 9);
+    }
+
+    #[test]
+    fn stable_substeps_enforce_explicit_decay_bound() {
+        let mut d_voxel = [0.0; S_EXT];
+        d_voxel[1] = 0.1;
+        let mut lambda_decay = [0.0; S_EXT];
+        lambda_decay[1] = 12.0;
+        let sim = SimulationConfig {
+            diffusion_substeps: 1,
+            dt: 1.0,
+            d_voxel,
+            lambda_decay,
+            ..Default::default()
+        };
+
+        assert_eq!(stable_diffusion_substeps(&sim), 12);
+    }
+
+    #[test]
+    fn invalid_diffusion_coefficients_are_rejected() {
+        let mut d_voxel = SimulationConfig::default().d_voxel;
+        d_voxel[1] = f32::NAN;
+        let sim = SimulationConfig {
+            d_voxel,
+            ..Default::default()
+        };
+        assert!(validate_diffusion_config(&sim).is_err());
+
+        let mut lambda_decay = SimulationConfig::default().lambda_decay;
+        lambda_decay[1] = -0.1;
+        let sim = SimulationConfig {
+            lambda_decay,
+            ..Default::default()
+        };
+        assert!(validate_diffusion_config(&sim).is_err());
+
+        let sim = SimulationConfig {
+            k_eps: 0.0,
+            ..Default::default()
+        };
+        assert!(validate_diffusion_config(&sim).is_err());
+    }
+
+    #[test]
+    fn zero_diffusion_substeps_is_noop() {
+        let sim = SimulationConfig {
+            diffusion_substeps: 0,
+            ..Default::default()
+        };
+
+        let mut field = Field::new();
+        init_deterministic_field(&mut field);
+        let before = field.data.clone();
+        let occupancy = vec![false; GRID_SIZE];
+
+        field.diffuse_tick_with_cells(&occupancy, &sim);
+
+        assert_eq!(field.data, before);
+    }
+
     #[test]
     fn occupied_voxel_is_copied_unchanged() {
-        let mut sim = SimulationConfig::default();
-        sim.diffusion_substeps = 1;
+        let sim = SimulationConfig {
+            diffusion_substeps: 1,
+            ..Default::default()
+        };
 
         let mut field = Field::new();
         init_deterministic_field(&mut field);
@@ -289,9 +489,60 @@ mod tests {
     }
 
     #[test]
+    fn occupied_neighbor_is_zero_flux_barrier() {
+        let sim = conservative_sim(1, 1.0);
+        let mut field = Field::new();
+        let x = GRID_X / 2;
+        let y = GRID_Y / 2;
+        let z = GRID_Z / 2;
+        field.set(x + 1, y, z, 1, 5.0);
+
+        let mut occupancy = vec![false; GRID_SIZE];
+        occupancy[z * GRID_Y * GRID_X + y * GRID_X + x] = true;
+
+        let before = total_species(&field, 1);
+        field.diffuse_tick_with_cells(&occupancy, &sim);
+        let after = total_species(&field, 1);
+
+        assert_eq!(field.get(x, y, z, 1), 0.0);
+        assert!(
+            (after - before).abs() <= 1e-5,
+            "mass changed across occupied barrier: before={before}, after={after}"
+        );
+    }
+
+    #[test]
+    fn heterogeneous_eps_diffusion_conserves_mass_without_decay() {
+        let sim = conservative_sim(1, 1.0);
+
+        let mut field = Field::new();
+        for z in 0..GRID_Z {
+            for y in 0..GRID_Y {
+                for x in 0..GRID_X {
+                    let structural = if x < GRID_X / 2 { 0.0 } else { 10.0 };
+                    field.set(x, y, z, 7, structural);
+                }
+            }
+        }
+        field.set(GRID_X / 2 - 1, GRID_Y / 2, GRID_Z / 2, 1, 2.0);
+        field.set(GRID_X / 2, GRID_Y / 2, GRID_Z / 2, 1, 1.0);
+
+        let before = total_species(&field, 1);
+        field.diffuse_tick(&sim);
+        let after = total_species(&field, 1);
+
+        assert!(
+            (after - before).abs() <= 1e-5,
+            "mass changed under conservative diffusion: before={before}, after={after}"
+        );
+    }
+
+    #[test]
     fn deterministic_diffusion_stays_finite_and_nonnegative() {
-        let mut sim = SimulationConfig::default();
-        sim.diffusion_substeps = 1;
+        let sim = SimulationConfig {
+            diffusion_substeps: 1,
+            ..Default::default()
+        };
 
         let mut field = Field::new();
         init_deterministic_field(&mut field);

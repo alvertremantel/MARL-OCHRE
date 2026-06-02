@@ -24,19 +24,20 @@ python scripts/check_binary_dump.py <run_dir> <tick> --require-full-rulesets
 
 | Argument | Description |
 |----------|-------------|
-| `run_dir` | Path to the engine output directory containing `run_meta.json` and `tick_<N>.field.bin(.zst)` / `tick_<N>.cells.bin(.zst)` |
+| `run_dir` | Path to the engine output directory containing `run_meta.json`, field snapshots, and cell snapshots when `write_binary_cells = true` |
 | `tick` | Tick number to inspect (e.g., `0`, `500`, `1000`) |
 | `--require-rulesets` | Also require and validate `tick_<N>.ruleset_layers.bin(.zst)` using metadata stride/count fields |
 | `--require-full-rulesets` | Also require and validate `tick_<N>.rulesets.bin(.zst)` using metadata header/cell-ref/dict fields |
 
 ### Checks Performed
 
-1. **Metadata:** Reads `run_meta.json` and extracts `field_byte_len` and
-    `cell_record_stride`.
+1. **Metadata:** Reads `run_meta.json` and validates the shared binary schema
+   fields (`endianness`, `field_dtype`, `field_layout`, snapshot patterns, and
+   `cell_record_stride`).
 2. **Field file size:** Verifies that the decompressed `tick_<T>.field.bin(.zst)` payload has exactly `field_byte_len` bytes.
 3. **First field value:** Reads the first `f32` (little-endian) from the field
    file and confirms it is a finite number (not `NaN` or `inf`).
-4. **Cell file integrity:** Verifies that the decompressed `tick_<T>.cells.bin(.zst)` payload size is evenly divisible by `cell_record_stride`.
+4. **Cell file integrity:** When `write_binary_cells = true`, verifies that the decompressed `tick_<T>.cells.bin(.zst)` payload size is evenly divisible by `cell_record_stride`; otherwise reports zero cells without requiring a cell file.
 5. **Ruleset layer integrity (optional):** When enabled in metadata or via `--require-rulesets`, verifies that `tick_<T>.ruleset_layers.bin(.zst)` contains exactly `grid_z` fixed-stride records.
 6. **Full ruleset integrity (optional):** When enabled in metadata or via `--require-full-rulesets`, verifies:
    - Magic bytes (`MRSF`) and format version match

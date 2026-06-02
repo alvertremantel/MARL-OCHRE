@@ -95,12 +95,12 @@ impl GuiState {
             .draft_species
             .parse()
             .map_err(|_| format!("invalid species number: {}", self.draft_species))?;
-        if let Some(max_ext) = s_ext {
-            if species >= max_ext {
-                return Err(format!(
-                    "species {species} is out of range for {max_ext} external species"
-                ));
-            }
+        if let Some(max_ext) = s_ext
+            && species >= max_ext
+        {
+            return Err(format!(
+                "species {species} is out of range for {max_ext} external species"
+            ));
         }
 
         let exposure: f32 = self
@@ -220,15 +220,14 @@ impl GuiState {
                     .add(egui::TextEdit::singleline(&mut self.tick_text).desired_width(60.0))
                     .lost_focus()
                     && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                    && let Ok(tick) = self.tick_text.parse::<u64>()
                 {
-                    if let Ok(tick) = self.tick_text.parse::<u64>() {
-                        actions.push(GuiAction::LoadTick(tick));
-                    }
+                    actions.push(GuiAction::LoadTick(tick));
                 }
-                if ui.button("Go").clicked() {
-                    if let Ok(tick) = self.tick_text.parse::<u64>() {
-                        actions.push(GuiAction::LoadTick(tick));
-                    }
+                if ui.button("Go").clicked()
+                    && let Ok(tick) = self.tick_text.parse::<u64>()
+                {
+                    actions.push(GuiAction::LoadTick(tick));
                 }
 
                 // Navigation buttons

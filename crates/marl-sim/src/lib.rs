@@ -5,7 +5,7 @@ pub mod stats;
 
 use marl_cell::cell::*;
 use marl_config::*;
-use marl_field::field::Field;
+use marl_field::field::{Field, validate_diffusion_config};
 use marl_field::light::LightField;
 #[cfg(feature = "gpu")]
 use marl_gpu::GpuFieldDiffuser;
@@ -14,13 +14,23 @@ use marl_output::data::DataLogger;
 use marl_output::snapshot;
 
 use crate::seeding::{init_field_boundaries, seed_cells};
-use crate::spatial::{apply_deltas_to_neighbors, find_empty_neighbor, read_neighbor_environment};
+use crate::spatial::{
+    apply_deltas_to_neighbors, find_empty_neighbor_avoiding, read_neighbor_environment,
+};
 use crate::starter_metabolisms::{make_anaerobe, make_chemolithotroph, make_phototroph};
 use crate::stats::{print_stats, print_z_profile};
 
 use rand::Rng;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
+
+fn cadence_due(tick: u32, max_ticks: u32, interval: u32) -> bool {
+    tick + 1 == max_ticks || (interval > 0 && tick.is_multiple_of(interval))
+}
+
+fn validate_run_config(cfg: &Config) -> Result<(), String> {
+    validate_diffusion_config(&cfg.simulation)
+}
 
 /// Run the full MARL simulation tick loop.
 ///
@@ -32,6 +42,11 @@ use std::time::Instant;
 /// - `cfg` — fully-parsed simulation + output configuration
 /// - `use_gpu_diffusion` — whether to attempt GPU-accelerated diffusion
 pub fn run(cfg: Config, _use_gpu_diffusion: bool) {
+    if let Err(e) = validate_run_config(&cfg) {
+        eprintln!("Invalid simulation configuration: {e}");
+        return;
+    }
+
     let mut rng = rand::rng();
 
     let mut field = Field::new();
@@ -156,6 +171,7 @@ pub fn run(cfg: Config, _use_gpu_diffusion: bool) {
     // Track per-tick division/death counts for the data logger
     let mut tick_divisions: u64;
     let mut tick_deaths: u64;
+    let mut occupancy = vec![false; GRID_X * GRID_Y * GRID_Z];
 
     for tick in 0..cfg.output.max_ticks {
         tick_divisions = 0;
@@ -171,7 +187,7 @@ pub fn run(cfg: Config, _use_gpu_diffusion: bool) {
         // D * dt_sub < 1/6 for all species (see config.rs).
         // Build occupancy grid so the diffusion solver knows where cells are.
         // Occupied voxels are fully excluded from diffusion.
-        let mut occupancy = vec![false; GRID_X * GRID_Y * GRID_Z];
+        occupancy.fill(false);
         for pos in cell_map.keys() {
             let idx =
                 pos[2] as usize * GRID_Y * GRID_X + pos[1] as usize * GRID_X + pos[0] as usize;
@@ -219,14 +235,20 @@ pub fn run(cfg: Config, _use_gpu_diffusion: bool) {
         // === STEP 5: Process fate events ===
         let mut births: Vec<CellState> = Vec::new();
         let mut deaths: Vec<usize> = Vec::new();
+        let mut reserved_birth_positions: HashSet<[u16; 3]> = HashSet::new();
 
         for (i, event) in &events {
             match event {
                 CellEvent::Division => {
                     let parent = &cells[*i];
-                    if let Some(daughter_pos) =
-                        find_empty_neighbor(parent.pos, &cell_map, &mut rng, sim)
-                    {
+                    if let Some(daughter_pos) = find_empty_neighbor_avoiding(
+                        parent.pos,
+                        &cell_map,
+                        Some(&reserved_birth_positions),
+                        &mut rng,
+                        sim,
+                    ) {
+                        reserved_birth_positions.insert(daughter_pos);
                         let mut daughter = parent.clone();
                         daughter.pos = daughter_pos;
                         daughter.age = 0;
@@ -269,9 +291,9 @@ pub fn run(cfg: Config, _use_gpu_diffusion: bool) {
         // Add newborns
         for cell in births {
             let pos = cell.pos;
-            if !cell_map.contains_key(&pos) {
+            if let std::collections::hash_map::Entry::Vacant(entry) = cell_map.entry(pos) {
                 let idx = cells.len();
-                cell_map.insert(pos, idx);
+                entry.insert(idx);
                 cells.push(cell);
             }
         }
@@ -284,7 +306,7 @@ pub fn run(cfg: Config, _use_gpu_diffusion: bool) {
         }
 
         // Print human-readable stats to stdout at configured interval
-        if tick % cfg.output.stats_interval == 0 || tick == cfg.output.max_ticks - 1 {
+        if cadence_due(tick, cfg.output.max_ticks, cfg.output.stats_interval) {
             print_stats(
                 tick,
                 &cells,
@@ -297,23 +319,23 @@ pub fn run(cfg: Config, _use_gpu_diffusion: bool) {
         }
 
         // Write raw binary snapshots for viewer ingestion.
-        if tick % cfg.output.snapshot_interval == 0 || tick == cfg.output.max_ticks - 1 {
+        if cadence_due(tick, cfg.output.max_ticks, cfg.output.snapshot_interval) {
             let t = tick as u64;
-            if cfg.output.write_binary_field {
-                if let Err(e) = binary_dump::write_field_dump(&field, t, &cfg.output) {
-                    eprintln!(
-                        "Warning: failed to write binary field snapshot at tick {}: {}",
-                        tick, e
-                    );
-                }
+            if cfg.output.write_binary_field
+                && let Err(e) = binary_dump::write_field_dump(&field, t, &cfg.output)
+            {
+                eprintln!(
+                    "Warning: failed to write binary field snapshot at tick {}: {}",
+                    tick, e
+                );
             }
-            if cfg.output.write_binary_cells {
-                if let Err(e) = binary_dump::write_cell_dump(&cells, t, &cfg.output) {
-                    eprintln!(
-                        "Warning: failed to write binary cell snapshot at tick {}: {}",
-                        tick, e
-                    );
-                }
+            if cfg.output.write_binary_cells
+                && let Err(e) = binary_dump::write_cell_dump(&cells, t, &cfg.output)
+            {
+                eprintln!(
+                    "Warning: failed to write binary cell snapshot at tick {}: {}",
+                    tick, e
+                );
             }
 
             // Optional legacy CSV snapshots (chemistry profiles + cell dumps + reactions).
@@ -340,8 +362,7 @@ pub fn run(cfg: Config, _use_gpu_diffusion: bool) {
         }
 
         let mode = cfg.output.ruleset_output_mode;
-        if mode.is_enabled()
-            && (tick % cfg.output.ruleset_interval == 0 || tick == cfg.output.max_ticks - 1)
+        if mode.is_enabled() && cadence_due(tick, cfg.output.max_ticks, cfg.output.ruleset_interval)
         {
             let t = tick as u64;
             if mode.writes_layer_averages()
@@ -364,9 +385,8 @@ pub fn run(cfg: Config, _use_gpu_diffusion: bool) {
 
         // Write PPM image snapshots (cross-sections, density maps)
         if writes_images
-            && (tick % cfg.output.image_interval == 0 || tick == cfg.output.max_ticks - 1)
-        {
-            if let Err(e) = snapshot::write_all_snapshots(
+            && cadence_due(tick, cfg.output.max_ticks, cfg.output.image_interval)
+            && let Err(e) = snapshot::write_all_snapshots(
                 &field,
                 &light,
                 &cell_map,
@@ -374,12 +394,12 @@ pub fn run(cfg: Config, _use_gpu_diffusion: bool) {
                 tick as u64,
                 &cfg.output,
                 sim,
-            ) {
-                eprintln!(
-                    "Warning: failed to write image snapshots at tick {}: {}",
-                    tick, e
-                );
-            }
+            )
+        {
+            eprintln!(
+                "Warning: failed to write image snapshots at tick {}: {}",
+                tick, e
+            );
         }
     }
 
@@ -425,14 +445,48 @@ pub fn run(cfg: Config, _use_gpu_diffusion: bool) {
     }
 
     // Write ancestry-colored XZ cross-section (red=photo, green=chemo, blue=anaerobe)
-    if cfg.output.write_ancestry_map {
-        if let Err(e) = snapshot::write_ancestry_xz(
+    if cfg.output.write_ancestry_map
+        && let Err(e) = snapshot::write_ancestry_xz(
             &cells,
             &cell_map,
             cfg.output.max_ticks as u64,
             &cfg.output.output_dir,
-        ) {
-            eprintln!("Warning: failed to write ancestry map: {}", e);
-        }
+        )
+    {
+        eprintln!("Warning: failed to write ancestry map: {}", e);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{cadence_due, validate_run_config};
+    use marl_config::{Config, SimulationConfig};
+
+    #[test]
+    fn zero_interval_disables_periodic_cadence_but_keeps_final_tick() {
+        assert!(!cadence_due(0, 10, 0));
+        assert!(cadence_due(9, 10, 0));
+    }
+
+    #[test]
+    fn nonzero_interval_matches_periodic_or_final_tick() {
+        assert!(cadence_due(0, 10, 5));
+        assert!(cadence_due(5, 10, 5));
+        assert!(!cadence_due(6, 10, 5));
+        assert!(cadence_due(9, 10, 5));
+    }
+
+    #[test]
+    fn invalid_diffusion_config_is_rejected_before_run_loop() {
+        let cfg = Config {
+            simulation: SimulationConfig {
+                k_eps: 0.0,
+                ..SimulationConfig::default()
+            },
+            ..Config::default()
+        };
+
+        let err = validate_run_config(&cfg).unwrap_err();
+        assert!(err.contains("k_eps"));
     }
 }

@@ -354,7 +354,7 @@ impl Renderer {
                         None
                     };
                     let picked = rfd::FileDialog::new()
-                        .set_directory(&current_dir.unwrap_or_else(|| PathBuf::from(".")))
+                        .set_directory(current_dir.unwrap_or_else(|| PathBuf::from(".")))
                         .pick_folder();
                     if let Some(dir) = picked {
                         self.gui.set_info(format!("loading {}…", dir.display()));
@@ -663,10 +663,10 @@ impl Renderer {
 
         // Validate run_meta.json exists and optionally clamp species
         let mut species = self.args.species;
-        if let Ok(meta) = load_run_meta(&dir) {
-            if species >= meta.s_ext {
-                species = meta.s_ext.saturating_sub(1);
-            }
+        if let Ok(meta) = load_run_meta(&dir)
+            && species >= meta.s_ext
+        {
+            species = meta.s_ext.saturating_sub(1);
         }
 
         let new_args = ViewerArgs {
@@ -1016,6 +1016,7 @@ fn create_cell_texture(
     });
 
     let alpha_byte = (args.cell_alpha * 255.0).round() as u8;
+    checked_cell_texture_len(gx, gy, gz)?;
     let data = build_cell_texture_data(gx, gy, gz, &payload.cells, payload.cell_mode, alpha_byte);
 
     let bytes_per_row = (gx as u32)
@@ -1073,7 +1074,7 @@ fn create_empty_cell_texture(
         view_formats: &[],
     });
 
-    let data = vec![0u8; (gx * gy * gz) as usize * 4];
+    let data = vec![0u8; checked_cell_texture_len(gx as usize, gy as usize, gz as usize)?];
     let bytes_per_row = gx
         .checked_mul(4)
         .ok_or("empty cell texture bytes_per_row overflow")?;
@@ -1113,11 +1114,11 @@ pub(crate) fn build_cell_texture_data(
     mode: CellMode,
     alpha: u8,
 ) -> Vec<u8> {
-    let voxel_count = gx
-        .checked_mul(gy)
-        .and_then(|v| v.checked_mul(gz))
-        .unwrap_or(0);
-    let mut data = vec![0u8; voxel_count * 4];
+    let mut data = vec![
+        0u8;
+        checked_cell_texture_len(gx, gy, gz)
+            .expect("cell texture dimensions overflow addressable memory")
+    ];
 
     match mode {
         CellMode::Off => {
@@ -1175,6 +1176,15 @@ pub(crate) fn build_cell_texture_data(
     data
 }
 
+fn checked_cell_texture_len(gx: usize, gy: usize, gz: usize) -> Result<usize, Box<dyn Error>> {
+    gx.checked_mul(gy)
+        .and_then(|v| v.checked_mul(gz))
+        .and_then(|v| v.checked_mul(4))
+        .ok_or_else(|| {
+            format!("cell texture dimensions {gx}x{gy}x{gz} overflow addressable memory").into()
+        })
+}
+
 fn starter_color(starter_type: u8) -> (u8, u8, u8) {
     match starter_type {
         0 => (230, 60, 55),  // phototroph: red
@@ -1186,9 +1196,10 @@ fn starter_color(starter_type: u8) -> (u8, u8, u8) {
 
 fn energy_color(t: f32) -> (u8, u8, u8) {
     // Dark purple (low energy) → yellow (high energy)
-    let r = ((30.0 + t * 225.0).round() as u8).min(255);
-    let g = ((10.0 + t * 245.0).round() as u8).min(255);
-    let b = ((60.0 * (1.0 - t)).round() as u8).min(255);
+    let t = t.clamp(0.0, 1.0);
+    let r = (30.0 + t * 225.0).round() as u8;
+    let g = (10.0 + t * 245.0).round() as u8;
+    let b = (60.0 * (1.0 - t)).round() as u8;
     (r, g, b)
 }
 
@@ -1227,8 +1238,8 @@ mod tests {
         assert_eq!(data[2], 55);
         assert_eq!(data[3], 200); // alpha
         // Rest zero
-        for i in 4..data.len() {
-            assert_eq!(data[i], 0, "byte {i} should be zero");
+        for (i, byte) in data.iter().enumerate().skip(4) {
+            assert_eq!(*byte, 0, "byte {i} should be zero");
         }
     }
 
@@ -1318,6 +1329,12 @@ mod tests {
         };
         let data = build_cell_texture_data(2, 2, 2, &[cell], CellMode::Off, 200);
         assert!(data.iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn checked_cell_texture_len_rejects_overflow() {
+        let err = checked_cell_texture_len(usize::MAX, 2, 1).unwrap_err();
+        assert!(err.to_string().contains("overflow"));
     }
 
     #[test]

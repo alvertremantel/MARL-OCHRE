@@ -39,6 +39,9 @@
 
 use marl_config::*;
 
+const LIGHT_SPECIES: usize = M_INT - 1;
+const CHEMICAL_INT_SPECIES: usize = M_INT - 1;
+
 /// Receptor parameters: Hill-function sensor for an external chemical.
 ///
 /// The Hill equation models cooperative binding:
@@ -220,27 +223,113 @@ impl CellState {
         }
 
         // === PHASE 2: TRANSPORT PASS ===
+        let mut valid_transport = [false; S_TRANSPORTERS];
+        let mut transport_ext = [0usize; S_TRANSPORTERS];
+        let mut transport_int = [0usize; S_TRANSPORTERS];
+        let mut uptake_request = [0.0f32; S_TRANSPORTERS];
+        let mut secretion_request = [0.0f32; S_TRANSPORTERS];
+        let mut uptake_requested_by_ext = [0.0f32; S_EXT];
+        let mut secretion_requested_by_int = [0.0f32; M_INT];
+
         for i in 0..S_TRANSPORTERS {
             let tp = &self.ruleset.transport[i];
             let ext_idx = tp.ext_species as usize;
             let int_idx = tp.int_species as usize;
-            if ext_idx >= S_EXT || int_idx >= M_INT {
+            if ext_idx >= S_EXT || int_idx >= CHEMICAL_INT_SPECIES {
                 continue;
             }
 
-            let uptake = tp.uptake_rate * ext_conc[ext_idx] / (1.0 + ext_conc[ext_idx]);
-            let secretion =
-                tp.secrete_rate * self.internal[int_idx] / (1.0 + self.internal[int_idx]);
+            let ext_available = ext_conc[ext_idx].max(0.0);
+            let internal_available = self.internal[int_idx].max(0.0);
+            let uptake_rate = tp.uptake_rate.max(0.0);
+            let secretion_rate = tp.secrete_rate.max(0.0);
+            let secretion = secretion_rate * internal_available / (1.0 + internal_available);
+            let uptake = uptake_rate * ext_available / (1.0 + ext_available);
 
-            self.internal[int_idx] =
-                (self.internal[int_idx] + (uptake - secretion) * dt).clamp(0.0, sim.c_max);
-            field_deltas[ext_idx] += (secretion - uptake) * dt;
+            valid_transport[i] = true;
+            transport_ext[i] = ext_idx;
+            transport_int[i] = int_idx;
+            secretion_request[i] = secretion * dt;
+            uptake_request[i] = uptake * dt;
+            secretion_requested_by_int[int_idx] += secretion_request[i];
+            uptake_requested_by_ext[ext_idx] += uptake_request[i];
+        }
+
+        let mut secretion_scale_by_int = [1.0f32; M_INT];
+        for int_idx in 0..CHEMICAL_INT_SPECIES {
+            let requested = secretion_requested_by_int[int_idx];
+            let available = self.internal[int_idx].max(0.0);
+            if requested > available && requested > 0.0 {
+                secretion_scale_by_int[int_idx] = available / requested;
+            }
+        }
+
+        let mut accepted_secretion_by_int = [0.0f32; M_INT];
+        for i in 0..S_TRANSPORTERS {
+            if !valid_transport[i] {
+                continue;
+            }
+            let int_idx = transport_int[i];
+            let ext_idx = transport_ext[i];
+            let amount = secretion_request[i] * secretion_scale_by_int[int_idx];
+            accepted_secretion_by_int[int_idx] += amount;
+            field_deltas[ext_idx] += amount;
+        }
+
+        let mut uptake_scale_by_ext = [1.0f32; S_EXT];
+        for ext_idx in 0..S_EXT {
+            let requested = uptake_requested_by_ext[ext_idx];
+            let available = ext_conc[ext_idx].max(0.0);
+            if requested > available && requested > 0.0 {
+                uptake_scale_by_ext[ext_idx] = available / requested;
+            }
+        }
+
+        let mut provisional_uptake = [0.0f32; S_TRANSPORTERS];
+        let mut uptake_requested_by_int = [0.0f32; M_INT];
+        for i in 0..S_TRANSPORTERS {
+            if !valid_transport[i] {
+                continue;
+            }
+            let ext_idx = transport_ext[i];
+            let int_idx = transport_int[i];
+            let amount = uptake_request[i] * uptake_scale_by_ext[ext_idx];
+            provisional_uptake[i] = amount;
+            uptake_requested_by_int[int_idx] += amount;
+        }
+
+        let mut uptake_scale_by_int = [1.0f32; M_INT];
+        for int_idx in 0..CHEMICAL_INT_SPECIES {
+            let requested = uptake_requested_by_int[int_idx];
+            let post_secretion = self.internal[int_idx] - accepted_secretion_by_int[int_idx];
+            let headroom = (sim.c_max - post_secretion).max(0.0);
+            if requested > headroom && requested > 0.0 {
+                uptake_scale_by_int[int_idx] = headroom / requested;
+            }
+        }
+
+        let mut accepted_uptake_by_int = [0.0f32; M_INT];
+        for i in 0..S_TRANSPORTERS {
+            if !valid_transport[i] {
+                continue;
+            }
+            let int_idx = transport_int[i];
+            let ext_idx = transport_ext[i];
+            let amount = provisional_uptake[i] * uptake_scale_by_int[int_idx];
+            accepted_uptake_by_int[int_idx] += amount;
+            field_deltas[ext_idx] -= amount;
+        }
+
+        for int_idx in 0..CHEMICAL_INT_SPECIES {
+            self.internal[int_idx] = (self.internal[int_idx] - accepted_secretion_by_int[int_idx]
+                + accepted_uptake_by_int[int_idx])
+                .clamp(0.0, sim.c_max);
         }
 
         // Light is stored as a pseudo-internal concentration so reactions can use it as catalyst.
         // Internal species 15 (last slot) = light availability this tick.
         // Photosynthesis reactions reference catalyst=15 to be light-dependent.
-        self.internal[M_INT - 1] = light;
+        self.internal[LIGHT_SPECIES] = light;
 
         // === PHASE 3: INTRACELLULAR REACTIONS ===
         for rxn in &self.ruleset.reactions {
@@ -254,7 +343,10 @@ impl CellState {
             let sub_idx = rxn.substrate as usize;
             let prod_idx = rxn.product as usize;
             let cat_idx = rxn.catalyst as usize;
-            if sub_idx >= M_INT || prod_idx >= M_INT || cat_idx >= M_INT {
+            if sub_idx >= CHEMICAL_INT_SPECIES
+                || prod_idx >= CHEMICAL_INT_SPECIES
+                || cat_idx >= M_INT
+            {
                 continue;
             }
 
@@ -269,19 +361,40 @@ impl CellState {
             // Optional cofactor
             if rxn.cofactor != 0xFF {
                 let cof_idx = rxn.cofactor as usize;
-                if cof_idx < M_INT {
+                if cof_idx < CHEMICAL_INT_SPECIES {
                     let cof = self.internal[cof_idx];
                     rate *= cof / (1.0 + cof);
-                    // Consume cofactor at half rate, clamped to available
-                    let cof_consumed = (0.5 * rate * dt).min(self.internal[cof_idx]);
-                    self.internal[cof_idx] -= cof_consumed;
+                } else {
+                    continue;
                 }
             }
 
-            // Clamp flux to available substrate — cannot produce more than consumed
-            let flux = (rate * dt).min(self.internal[sub_idx]);
+            // Clamp flux to available substrate and product capacity so reactions
+            // cannot create overflow or destroy substrate at a saturated product.
+            let cof_idx = (rxn.cofactor != 0xFF).then_some(rxn.cofactor as usize);
+            let mut max_flux = rate * dt;
+            if let Some(cof_idx) = cof_idx {
+                if cof_idx == sub_idx {
+                    max_flux = max_flux.min(self.internal[sub_idx] / 1.5);
+                } else {
+                    max_flux = max_flux.min(self.internal[sub_idx]);
+                    max_flux = max_flux.min(self.internal[cof_idx] / 0.5);
+                }
+            } else {
+                max_flux = max_flux.min(self.internal[sub_idx]);
+            }
+
+            let product_headroom = (sim.c_max - self.internal[prod_idx]).max(0.0);
+            let product_gain_per_flux = if cof_idx == Some(prod_idx) { 0.5 } else { 1.0 };
+            let flux = max_flux.min(product_headroom / product_gain_per_flux);
+            if flux <= 0.0 {
+                continue;
+            }
             self.internal[sub_idx] -= flux;
-            self.internal[prod_idx] = (self.internal[prod_idx] + flux).min(sim.c_max);
+            if let Some(cof_idx) = cof_idx {
+                self.internal[cof_idx] -= 0.5 * flux;
+            }
+            self.internal[prod_idx] += flux;
         }
 
         // Maintenance energy drain: each tick, the cell loses lambda_maintenance
@@ -296,7 +409,8 @@ impl CellState {
         } else {
             1.0
         };
-        self.internal[0] *= 1.0 - sim.lambda_maintenance * prep_multiplier * dt;
+        let maintenance_fraction = (sim.lambda_maintenance * prep_multiplier * dt).clamp(0.0, 1.0);
+        self.internal[0] *= 1.0 - maintenance_fraction;
 
         // Protein expression cost: each active enzyme requires transcription,
         // translation, and folding resources. No-op reactions (substrate == product)
@@ -315,14 +429,16 @@ impl CellState {
             for eff in &self.ruleset.effectors {
                 let int_idx = eff.int_species as usize;
                 let ext_idx = eff.ext_species as usize;
-                if int_idx >= M_INT || ext_idx >= S_EXT {
+                if int_idx >= CHEMICAL_INT_SPECIES || ext_idx >= S_EXT {
                     continue;
                 }
 
                 if self.internal[int_idx] > eff.threshold {
-                    let amount =
-                        eff.rate * self.internal[int_idx] / (1.0 + self.internal[int_idx]) * dt;
-                    self.internal[int_idx] = (self.internal[int_idx] - amount).max(0.0);
+                    let requested = eff.rate.max(0.0) * self.internal[int_idx]
+                        / (1.0 + self.internal[int_idx])
+                        * dt;
+                    let amount = requested.min(self.internal[int_idx]);
+                    self.internal[int_idx] -= amount;
                     field_deltas[ext_idx] += amount;
                 }
             }
@@ -393,6 +509,38 @@ use rand::Rng;
 use rand_distr::{Distribution, Normal};
 
 impl Ruleset {
+    fn sanitize_indices(&mut self) {
+        for t in &mut self.transport {
+            if t.ext_species as usize >= S_EXT || t.int_species as usize >= CHEMICAL_INT_SPECIES {
+                t.uptake_rate = 0.0;
+                t.secrete_rate = 0.0;
+                t.ext_species = 0;
+                t.int_species = 0;
+            }
+        }
+        for r in &mut self.reactions {
+            if r.substrate as usize >= CHEMICAL_INT_SPECIES
+                || r.product as usize >= CHEMICAL_INT_SPECIES
+                || r.catalyst as usize >= M_INT
+            {
+                r.v_max = 0.0;
+                r.substrate = 0;
+                r.product = 0;
+                r.catalyst = 0;
+            }
+            if r.cofactor != 0xFF && r.cofactor as usize >= CHEMICAL_INT_SPECIES {
+                r.cofactor = 0xFF;
+            }
+        }
+        for e in &mut self.effectors {
+            if e.int_species as usize >= CHEMICAL_INT_SPECIES || e.ext_species as usize >= S_EXT {
+                e.rate = 0.0;
+                e.int_species = 0;
+                e.ext_species = 0;
+            }
+        }
+    }
+
     /// Apply random mutations to all evolvable parameters.
     ///
     /// Called on the daughter cell's ruleset after division. Each parameter
@@ -433,7 +581,7 @@ impl Ruleset {
                 t.ext_species = rng.random_range(0..S_EXT as u8);
             }
             if rng.random::<f32>() < rate * sim.structural_mutation_rate_mult {
-                t.int_species = rng.random_range(0..M_INT as u8);
+                t.int_species = rng.random_range(0..CHEMICAL_INT_SPECIES as u8);
             }
         }
 
@@ -471,7 +619,7 @@ impl Ruleset {
                         self.reactions[i].substrate = self.reactions[donor].substrate;
                     }
                 } else {
-                    self.reactions[i].substrate = rng.random_range(0..M_INT as u8);
+                    self.reactions[i].substrate = rng.random_range(0..CHEMICAL_INT_SPECIES as u8);
                 }
             }
             if rng.random::<f32>() < rate * sim.structural_mutation_rate_mult {
@@ -482,7 +630,7 @@ impl Ruleset {
                         self.reactions[i].product = self.reactions[donor].product;
                     }
                 } else {
-                    self.reactions[i].product = rng.random_range(0..M_INT as u8);
+                    self.reactions[i].product = rng.random_range(0..CHEMICAL_INT_SPECIES as u8);
                 }
             }
             if rng.random::<f32>() < rate * sim.structural_mutation_rate_mult {
@@ -520,6 +668,298 @@ impl Ruleset {
             self.mutation_rate = self
                 .mutation_rate
                 .clamp(sim.meta_mutation_clamp_low, sim.meta_mutation_clamp_high);
+        }
+
+        self.sanitize_indices();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rand::SeedableRng;
+    use rand::rngs::StdRng;
+
+    fn inactive_receptor() -> ReceptorParams {
+        ReceptorParams {
+            k_half: 1.0,
+            n_hill: 1.0,
+            gain: 0.0,
+        }
+    }
+
+    fn inactive_transport() -> TransportParams {
+        TransportParams {
+            uptake_rate: 0.0,
+            secrete_rate: 0.0,
+            ext_species: 0,
+            int_species: 0,
+        }
+    }
+
+    fn inactive_reaction() -> Reaction {
+        Reaction {
+            substrate: 0,
+            product: 0,
+            catalyst: 0,
+            cofactor: 0xFF,
+            k_m: 1.0,
+            v_max: 0.0,
+            k_cat: 1.0,
+        }
+    }
+
+    fn inactive_effector() -> EffectorParams {
+        EffectorParams {
+            threshold: f32::MAX,
+            rate: 0.0,
+            int_species: 0,
+            ext_species: 0,
+        }
+    }
+
+    fn test_ruleset() -> Ruleset {
+        Ruleset {
+            receptors: std::array::from_fn(|_| inactive_receptor()),
+            transport: std::array::from_fn(|_| inactive_transport()),
+            reactions: std::array::from_fn(|_| inactive_reaction()),
+            effectors: std::array::from_fn(|_| inactive_effector()),
+            fate: FateParams {
+                division_energy: 100.0,
+                death_energy: 0.0,
+                quiescence_energy: 0.0,
+                division_prep_ticks: 20.0,
+            },
+            hgt_propensity: 0.0,
+            mutation_rate: 0.0,
+        }
+    }
+
+    fn test_cell(ruleset: Ruleset) -> CellState {
+        let mut internal = [0.0f32; M_INT];
+        internal[0] = 10.0;
+        CellState {
+            pos: [1, 1, 1],
+            lineage_id: 1,
+            age: 0,
+            internal,
+            ruleset,
+            quiescent: false,
+            starter_type: 0,
+            prep_remaining: 0,
+        }
+    }
+
+    #[test]
+    fn transport_uptake_is_limited_by_available_external_concentration() {
+        let mut ruleset = test_ruleset();
+        ruleset.transport[0] = TransportParams {
+            uptake_rate: 100.0,
+            secrete_rate: 0.0,
+            ext_species: 2,
+            int_species: 2,
+        };
+        let mut cell = test_cell(ruleset);
+        let mut ext = [0.0f32; S_EXT];
+        ext[2] = 0.1;
+
+        let (deltas, _) = cell.tick(&ext, 0.0, &SimulationConfig::default());
+
+        assert!((cell.internal[2] - 0.1).abs() < 1e-6);
+        assert!((deltas[2] + 0.1).abs() < 1e-6);
+    }
+
+    #[test]
+    fn transport_uptake_stops_when_internal_pool_is_full() {
+        let mut ruleset = test_ruleset();
+        ruleset.transport[0] = TransportParams {
+            uptake_rate: 100.0,
+            secrete_rate: 0.0,
+            ext_species: 2,
+            int_species: 2,
+        };
+        let sim = SimulationConfig::default();
+        let mut cell = test_cell(ruleset);
+        cell.internal[2] = sim.c_max;
+        let mut ext = [0.0f32; S_EXT];
+        ext[2] = 1.0;
+
+        let (deltas, _) = cell.tick(&ext, 0.0, &sim);
+
+        assert_eq!(cell.internal[2], sim.c_max);
+        assert_eq!(deltas[2], 0.0);
+    }
+
+    #[test]
+    fn duplicated_transporters_share_external_uptake_budget() {
+        let mut ruleset = test_ruleset();
+        ruleset.transport[0] = TransportParams {
+            uptake_rate: 100.0,
+            secrete_rate: 0.0,
+            ext_species: 2,
+            int_species: 2,
+        };
+        ruleset.transport[1] = TransportParams {
+            uptake_rate: 100.0,
+            secrete_rate: 0.0,
+            ext_species: 2,
+            int_species: 3,
+        };
+        let mut cell = test_cell(ruleset);
+        let mut ext = [0.0f32; S_EXT];
+        ext[2] = 1.0;
+
+        let (deltas, _) = cell.tick(&ext, 0.0, &SimulationConfig::default());
+
+        assert!((cell.internal[2] + cell.internal[3] - 1.0).abs() < 1e-6);
+        assert!((deltas[2] + 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn duplicated_secretors_share_internal_pool_budget() {
+        let mut ruleset = test_ruleset();
+        ruleset.transport[0] = TransportParams {
+            uptake_rate: 0.0,
+            secrete_rate: 100.0,
+            ext_species: 2,
+            int_species: 2,
+        };
+        ruleset.transport[1] = TransportParams {
+            uptake_rate: 0.0,
+            secrete_rate: 100.0,
+            ext_species: 3,
+            int_species: 2,
+        };
+        let mut cell = test_cell(ruleset);
+        cell.internal[2] = 1.0;
+
+        let (deltas, _) = cell.tick(&[0.0; S_EXT], 0.0, &SimulationConfig::default());
+
+        assert_eq!(cell.internal[2], 0.0);
+        assert!((deltas[2] + deltas[3] - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn effector_secretion_is_limited_by_internal_pool() {
+        let mut ruleset = test_ruleset();
+        ruleset.effectors[0] = EffectorParams {
+            threshold: 0.0,
+            rate: 100.0,
+            int_species: 2,
+            ext_species: 4,
+        };
+        let mut cell = test_cell(ruleset);
+        cell.internal[2] = 0.05;
+
+        let (deltas, _) = cell.tick(&[0.0; S_EXT], 0.0, &SimulationConfig::default());
+
+        assert_eq!(cell.internal[2], 0.0);
+        assert!((deltas[4] - 0.05).abs() < 1e-6);
+    }
+
+    #[test]
+    fn saturated_reaction_product_does_not_destroy_substrate() {
+        let mut ruleset = test_ruleset();
+        ruleset.reactions[0] = Reaction {
+            substrate: 2,
+            product: 3,
+            catalyst: 0,
+            cofactor: 0xFF,
+            k_m: 0.01,
+            v_max: 100.0,
+            k_cat: 0.01,
+        };
+        let sim = SimulationConfig::default();
+        let mut cell = test_cell(ruleset);
+        cell.internal[2] = 1.0;
+        cell.internal[3] = sim.c_max;
+
+        cell.tick(&[0.0; S_EXT], 0.0, &sim);
+
+        assert!((cell.internal[2] - 1.0).abs() < 1e-6);
+        assert_eq!(cell.internal[3], sim.c_max);
+    }
+
+    #[test]
+    fn cofactor_consumption_tracks_actual_flux() {
+        let mut ruleset = test_ruleset();
+        ruleset.reactions[0] = Reaction {
+            substrate: 2,
+            product: 3,
+            catalyst: 0,
+            cofactor: 1,
+            k_m: 0.01,
+            v_max: 100.0,
+            k_cat: 0.01,
+        };
+        let mut cell = test_cell(ruleset);
+        cell.internal[1] = 10.0;
+        cell.internal[2] = 0.1;
+
+        cell.tick(&[0.0; S_EXT], 0.0, &SimulationConfig::default());
+
+        assert!((cell.internal[2] - 0.0).abs() < 1e-6);
+        assert!((cell.internal[3] - 0.1).abs() < 1e-6);
+        assert!((cell.internal[1] - 9.95).abs() < 1e-6);
+    }
+
+    #[test]
+    fn cofactor_same_as_substrate_cannot_overdraw_pool() {
+        let mut ruleset = test_ruleset();
+        ruleset.reactions[0] = Reaction {
+            substrate: 2,
+            product: 3,
+            catalyst: 0,
+            cofactor: 2,
+            k_m: 0.01,
+            v_max: 100.0,
+            k_cat: 0.01,
+        };
+        let mut cell = test_cell(ruleset);
+        cell.internal[2] = 0.15;
+
+        cell.tick(&[0.0; S_EXT], 0.0, &SimulationConfig::default());
+
+        assert!(cell.internal[2].abs() < 1e-6);
+        assert!((cell.internal[3] - 0.1).abs() < 1e-6);
+    }
+
+    #[test]
+    fn mutation_keeps_light_as_catalyst_only_pseudo_species() {
+        let mut ruleset = test_ruleset();
+        ruleset.mutation_rate = 1.0;
+        ruleset.transport[0].int_species = LIGHT_SPECIES as u8;
+        ruleset.reactions[0] = Reaction {
+            substrate: LIGHT_SPECIES as u8,
+            product: LIGHT_SPECIES as u8,
+            catalyst: M_INT as u8,
+            cofactor: LIGHT_SPECIES as u8,
+            k_m: 1.0,
+            v_max: 1.0,
+            k_cat: 1.0,
+        };
+        ruleset.effectors[0].int_species = LIGHT_SPECIES as u8;
+        ruleset.effectors[0].ext_species = S_EXT as u8;
+        let sim = SimulationConfig {
+            structural_mutation_rate_mult: 1.0,
+            ..SimulationConfig::default()
+        };
+        let mut rng = StdRng::seed_from_u64(7);
+
+        ruleset.mutate(&mut rng, &sim);
+
+        for t in &ruleset.transport {
+            assert!((t.int_species as usize) < LIGHT_SPECIES);
+        }
+        for r in &ruleset.reactions {
+            assert!((r.substrate as usize) < LIGHT_SPECIES);
+            assert!((r.product as usize) < LIGHT_SPECIES);
+            assert!((r.catalyst as usize) < M_INT);
+            assert!(r.cofactor == 0xFF || (r.cofactor as usize) < LIGHT_SPECIES);
+        }
+        for e in &ruleset.effectors {
+            assert!((e.int_species as usize) < LIGHT_SPECIES);
+            assert!((e.ext_species as usize) < S_EXT);
         }
     }
 }

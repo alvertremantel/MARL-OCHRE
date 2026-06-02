@@ -1,6 +1,6 @@
 use crate::context::{GpuContext, GpuError};
 use marl_config::{GRID_X, GRID_Y, GRID_Z, S_EXT, SimulationConfig};
-use marl_field::field::Field;
+use marl_field::field::{Field, stable_diffusion_substeps, validate_diffusion_config};
 
 const GRID_SIZE: usize = GRID_X * GRID_Y * GRID_Z;
 const FIELD_FLOATS: usize = GRID_SIZE * S_EXT;
@@ -20,12 +20,14 @@ struct DiffusionParams {
 pub struct GpuFieldDiffuser {
     context: GpuContext,
     pipeline: wgpu::ComputePipeline,
-    bind_group_layout: wgpu::BindGroupLayout,
+    bind_group_a_to_b: wgpu::BindGroup,
+    bind_group_b_to_a: wgpu::BindGroup,
     field_buffer_a: wgpu::Buffer,
     field_buffer_b: wgpu::Buffer,
     occupancy_buffer: wgpu::Buffer,
     params_buffer: wgpu::Buffer,
     staging_buffer: wgpu::Buffer,
+    occupancy_upload: Vec<u32>,
 }
 
 impl GpuFieldDiffuser {
@@ -142,16 +144,36 @@ impl GpuFieldDiffuser {
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
+        let bind_group_a_to_b = create_diffusion_bind_group(
+            device,
+            &bind_group_layout,
+            &field_buffer_a,
+            &field_buffer_b,
+            &occupancy_buffer,
+            &params_buffer,
+            "MARL Field Diffusion Bind Group A to B",
+        );
+        let bind_group_b_to_a = create_diffusion_bind_group(
+            device,
+            &bind_group_layout,
+            &field_buffer_b,
+            &field_buffer_a,
+            &occupancy_buffer,
+            &params_buffer,
+            "MARL Field Diffusion Bind Group B to A",
+        );
 
         Ok(Self {
             context,
             pipeline,
-            bind_group_layout,
+            bind_group_a_to_b,
+            bind_group_b_to_a,
             field_buffer_a,
             field_buffer_b,
             occupancy_buffer,
             params_buffer,
             staging_buffer,
+            occupancy_upload: vec![0; GRID_SIZE],
         })
     }
 
@@ -173,22 +195,23 @@ impl GpuFieldDiffuser {
                 occupancy.len()
             )));
         }
-        if sim.diffusion_substeps == 0 {
+        validate_diffusion_config(sim).map_err(GpuError::InvalidInput)?;
+        let substeps = stable_diffusion_substeps(sim);
+        if substeps == 0 {
             return Ok(());
         }
 
         let params = DiffusionParams {
-            dt_sub: sim.dt / sim.diffusion_substeps as f32,
+            dt_sub: sim.dt / substeps as f32,
             alpha_eps: sim.alpha_eps,
             k_eps: sim.k_eps,
             _pad0: 0.0,
             d_voxel: sim.d_voxel,
             lambda_decay: sim.lambda_decay,
         };
-        let occupancy_u32: Vec<u32> = occupancy
-            .iter()
-            .map(|&occupied| u32::from(occupied))
-            .collect();
+        for (dst, &occupied) in self.occupancy_upload.iter_mut().zip(occupancy) {
+            *dst = u32::from(occupied);
+        }
 
         self.context
             .queue
@@ -196,7 +219,7 @@ impl GpuFieldDiffuser {
         self.context.queue.write_buffer(
             &self.occupancy_buffer,
             0,
-            bytemuck::cast_slice(&occupancy_u32),
+            bytemuck::cast_slice(&self.occupancy_upload),
         );
         self.context
             .queue
@@ -209,48 +232,23 @@ impl GpuFieldDiffuser {
                     label: Some("MARL Field Diffusion Encoder"),
                 });
 
-        for substep in 0..sim.diffusion_substeps {
-            let (input, output) = if substep % 2 == 0 {
-                (&self.field_buffer_a, &self.field_buffer_b)
+        for substep in 0..substeps {
+            let bind_group = if substep % 2 == 0 {
+                &self.bind_group_a_to_b
             } else {
-                (&self.field_buffer_b, &self.field_buffer_a)
+                &self.bind_group_b_to_a
             };
-            let bind_group = self
-                .context
-                .device
-                .create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("MARL Field Diffusion Bind Group"),
-                    layout: &self.bind_group_layout,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: input.as_entire_binding(),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: output.as_entire_binding(),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 2,
-                            resource: self.occupancy_buffer.as_entire_binding(),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 3,
-                            resource: self.params_buffer.as_entire_binding(),
-                        },
-                    ],
-                });
 
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("MARL Field Diffusion Pass"),
                 timestamp_writes: None,
             });
             pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &bind_group, &[]);
+            pass.set_bind_group(0, bind_group, &[]);
             pass.dispatch_workgroups((GRID_SIZE as u32).div_ceil(WORKGROUP_SIZE), 1, 1);
         }
 
-        let final_buffer = if sim.diffusion_substeps % 2 == 0 {
+        let final_buffer = if substeps.is_multiple_of(2) {
             &self.field_buffer_a
         } else {
             &self.field_buffer_b
@@ -292,6 +290,39 @@ impl GpuFieldDiffuser {
     }
 }
 
+fn create_diffusion_bind_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    input: &wgpu::Buffer,
+    output: &wgpu::Buffer,
+    occupancy: &wgpu::Buffer,
+    params: &wgpu::Buffer,
+    label: &'static str,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some(label),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: input.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: output.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: occupancy.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: params.as_entire_binding(),
+            },
+        ],
+    })
+}
+
 fn field_buffer_bytes() -> u64 {
     (FIELD_FLOATS * std::mem::size_of::<f32>()) as u64
 }
@@ -303,5 +334,11 @@ mod tests {
     #[test]
     fn diffusion_params_layout_is_stable() {
         assert_eq!(std::mem::size_of::<DiffusionParams>(), 112);
+        assert_eq!(std::mem::offset_of!(DiffusionParams, dt_sub), 0);
+        assert_eq!(std::mem::offset_of!(DiffusionParams, alpha_eps), 4);
+        assert_eq!(std::mem::offset_of!(DiffusionParams, k_eps), 8);
+        assert_eq!(std::mem::offset_of!(DiffusionParams, _pad0), 12);
+        assert_eq!(std::mem::offset_of!(DiffusionParams, d_voxel), 16);
+        assert_eq!(std::mem::offset_of!(DiffusionParams, lambda_decay), 64);
     }
 }

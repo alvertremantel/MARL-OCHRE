@@ -5,17 +5,22 @@ use rand::Rng;
 /// This transfers complete reaction rules (not individual parameters),
 /// paralleling real bacterial HGT of metabolic operons.
 pub fn transfer_reaction(donor: &Ruleset, recipient: &mut Ruleset, rng: &mut impl Rng) {
-    // Find a non-trivial reaction in the donor
-    let active: Vec<usize> = (0..donor.reactions.len())
-        .filter(|&i| donor.reactions[i].v_max.abs() > 1e-9)
-        .collect();
-
-    if active.is_empty() {
-        return;
+    // Reservoir-sample a non-trivial donor reaction without allocating.
+    let mut donor_idx = None;
+    let mut seen = 0usize;
+    for (i, reaction) in donor.reactions.iter().enumerate() {
+        if reaction.v_max.abs() <= 1e-9 {
+            continue;
+        }
+        seen += 1;
+        if rng.random_range(0..seen) == 0 {
+            donor_idx = Some(i);
+        }
     }
 
-    // Pick a random active reaction from donor
-    let donor_idx = active[rng.random_range(0..active.len())];
+    let Some(donor_idx) = donor_idx else {
+        return;
+    };
     let donated = donor.reactions[donor_idx].clone();
 
     // Find an inactive slot in recipient (or overwrite random slot)

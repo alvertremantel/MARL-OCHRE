@@ -89,29 +89,27 @@ fn intersect_box(
 
 fn world_to_voxel(world: vec3<f32>) -> vec3<i32> {
     let ascl = params.axis_scale.xyz;
+    let upper = 0.99999994;
     // world x in [-half.x, +half.x] → voxel x in [0, grid_x-1]
-    let vx = i32(round((world.x / ascl.x + 0.5) * f32(params.grid.x)));
+    let nx = clamp(world.x / ascl.x + 0.5, 0.0, upper);
+    let vx = clamp(i32(floor(nx * f32(params.grid.x))), 0, i32(params.grid.x) - 1);
     // world y in [-half.y, +half.y] → voxel y in [0, grid_y-1]
-    let vy = i32(round((world.y / ascl.y + 0.5) * f32(params.grid.y)));
+    let ny = clamp(world.y / ascl.y + 0.5, 0.0, upper);
+    let vy = clamp(i32(floor(ny * f32(params.grid.y))), 0, i32(params.grid.y) - 1);
     // world z in [+half.z, -half.z] → voxel z in [0, grid_z-1]
     //   top surface (tex_z=0) corresponds to world_z = +half.z
-    let vz = i32(round((0.5 - world.z / ascl.z) * f32(params.grid.z)));
+    let nz = clamp(0.5 - world.z / ascl.z, 0.0, upper);
+    let vz = clamp(i32(floor(nz * f32(params.grid.z))), 0, i32(params.grid.z) - 1);
     return vec3<i32>(vx, vy, vz);
 }
 
-// The same, but clamped and cast to u32 for field texture sampling.
+// The same voxel mapping, with x expanded for species-packed field sampling.
 fn world_to_field_texel(world: vec3<f32>) -> vec3<i32> {
     let v = world_to_voxel(world);
-    let gx = i32(params.grid.x);
-    let gy = i32(params.grid.y);
-    let gz = i32(params.grid.z);
-    let cx = clamp(v.x, 0, gx - 1);
-    let cy = clamp(v.y, 0, gy - 1);
-    let cz = clamp(v.z, 0, gz - 1);
     let species = i32(params.render.z);
     let s_ext = i32(params.grid.w);
-    let tex_x = cx * s_ext + min(species, s_ext - 1);
-    return vec3<i32>(tex_x, cy, cz);
+    let tex_x = v.x * s_ext + min(species, s_ext - 1);
+    return vec3<i32>(tex_x, v.y, v.z);
 }
 
 // ---------------------------------------------------------------------------

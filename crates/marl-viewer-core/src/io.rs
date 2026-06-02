@@ -1,5 +1,5 @@
 use std::error::Error;
-use std::fs;
+use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 
 use marl_format::RunMeta;
@@ -64,6 +64,12 @@ pub fn load_snapshot(args: &ViewerArgs) -> Result<SnapshotPayload, Box<dyn Error
     }
 
     // --- tick_<T>.field.bin ---
+    if !meta.write_binary_field {
+        return Err(
+            "field output was disabled for this run; viewer requires write_binary_field = true"
+                .into(),
+        );
+    }
     let field_path = snapshot_path(&args.output_dir, &meta.field_file_pattern, args.tick)?;
     let field_bytes = read_binary_payload(&field_path)?;
     if field_bytes.len() as u64 != meta.field_byte_len {
@@ -107,6 +113,12 @@ pub fn load_snapshot(args: &ViewerArgs) -> Result<SnapshotPayload, Box<dyn Error
 /// number, sorts ascending, and deduplicates. Returns an empty `Vec` if
 /// the directory is readable but contains no matching files.
 pub fn discover_field_ticks(output_dir: &std::path::Path) -> Result<Vec<u64>, Box<dyn Error>> {
+    let meta_path = output_dir.join("run_meta.json");
+    let field_pattern = if meta_path.exists() {
+        Some(load_run_meta(output_dir)?.field_file_pattern)
+    } else {
+        None
+    };
     let entries = fs::read_dir(output_dir)
         .map_err(|e| format!("failed to read directory {}: {e}", output_dir.display()))?;
 
@@ -120,7 +132,11 @@ pub fn discover_field_ticks(output_dir: &std::path::Path) -> Result<Vec<u64>, Bo
         })?;
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
-        if let Some(tick) = parse_field_tick_file_name(&name_str) {
+        let tick = match field_pattern.as_deref() {
+            Some(pattern) => parse_tick_file_name_with_pattern(&name_str, pattern),
+            None => parse_field_tick_file_name(&name_str),
+        };
+        if let Some(tick) = tick {
             ticks.push(tick);
         }
     }
@@ -135,10 +151,13 @@ pub fn discover_field_ticks(output_dir: &std::path::Path) -> Result<Vec<u64>, Bo
 /// Returns `Some(tick)` if the name starts with `tick_`, ends with
 /// `.field.bin`, and the middle portion is a valid `u64`.
 fn parse_field_tick_file_name(name: &str) -> Option<u64> {
-    let without_prefix = name.strip_prefix("tick_")?;
-    let digits = without_prefix
-        .strip_suffix(".field.bin.zst")
-        .or_else(|| without_prefix.strip_suffix(".field.bin"))?;
+    parse_tick_file_name_with_pattern(name, marl_format::FIELD_FILE_PATTERN_RAW)
+        .or_else(|| parse_tick_file_name_with_pattern(name, "tick_<T>.field.bin.zst"))
+}
+
+fn parse_tick_file_name_with_pattern(name: &str, pattern: &str) -> Option<u64> {
+    let (prefix, suffix) = pattern.split_once("<T>")?;
+    let digits = name.strip_prefix(prefix)?.strip_suffix(suffix)?;
     // Reject empty digit string or strings with non-digit characters
     if digits.is_empty() {
         return None;
@@ -173,7 +192,7 @@ fn load_cell_records(args: &ViewerArgs, meta: &RunMeta) -> Result<Vec<LoadedCell
     let raw = read_binary_payload(&cells_path)?;
 
     let stride = marl_format::CELL_RECORD_STRIDE as usize;
-    if raw.len() % stride != 0 {
+    if !raw.len().is_multiple_of(stride) {
         return Err(format!(
             "{} length {} is not a multiple of cell record stride {}",
             cells_path.display(),
@@ -204,12 +223,13 @@ fn snapshot_path(output_dir: &Path, pattern: &str, tick: u64) -> Result<PathBuf,
 }
 
 fn read_binary_payload(path: &Path) -> Result<Vec<u8>, Box<dyn Error>> {
-    let raw = fs::read(path).map_err(|e| format!("failed to read {}: {e}", path.display()))?;
     if path.extension().and_then(|ext| ext.to_str()) == Some("zst") {
-        zstd::stream::decode_all(&raw[..])
+        let file =
+            File::open(path).map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+        zstd::stream::decode_all(file)
             .map_err(|e| format!("failed to decompress {}: {e}", path.display()).into())
     } else {
-        Ok(raw)
+        fs::read(path).map_err(|e| format!("failed to read {}: {e}", path.display()).into())
     }
 }
 
@@ -219,7 +239,7 @@ fn read_binary_payload(path: &Path) -> Result<Vec<u8>, Box<dyn Error>> {
 fn parse_one_cell_record(
     record: &[u8],
     index: usize,
-    path: &PathBuf,
+    path: &Path,
     meta: &RunMeta,
 ) -> Result<LoadedCell, Box<dyn Error>> {
     // Layout: pos_x:f32, pos_y:f32, pos_z:f32, lineage_id:u64, starter_type:u8, energy:f32
@@ -232,10 +252,11 @@ fn parse_one_cell_record(
     let energy = f32::from_le_bytes(record[21..25].try_into().unwrap());
 
     // Validate position: finite, non-negative, close to integer, within bounds
-    for (val, dim, name) in [
-        (pos_x, meta.grid_x, "x"),
-        (pos_y, meta.grid_y, "y"),
-        (pos_z, meta.grid_z, "z"),
+    let mut pos = [0u32; 3];
+    for (axis, val, dim, name) in [
+        (0, pos_x, meta.grid_x, "x"),
+        (1, pos_y, meta.grid_y, "y"),
+        (2, pos_z, meta.grid_z, "z"),
     ] {
         if !val.is_finite() || val < 0.0 {
             return Err(format!(
@@ -246,6 +267,14 @@ fn parse_one_cell_record(
             .into());
         }
         let rounded = val.round();
+        if rounded > u32::MAX as f32 {
+            return Err(format!(
+                "{} record {}: position {name}={val} is too large to fit a voxel index",
+                path.display(),
+                index
+            )
+            .into());
+        }
         if (val - rounded).abs() > 0.001 {
             return Err(format!(
                 "{} record {}: position {name}={val} is not close to an integer voxel index",
@@ -259,10 +288,11 @@ fn parse_one_cell_record(
                 "{} record {}: position {name}={val} out of bounds (grid_{name}={dim})",
                 path.display(),
                 index,
-                dim = name
+                dim = dim
             )
             .into());
         }
+        pos[axis] = rounded as u32;
     }
 
     if !energy.is_finite() {
@@ -275,7 +305,7 @@ fn parse_one_cell_record(
     }
 
     Ok(LoadedCell {
-        pos: [pos_x as u32, pos_y as u32, pos_z as u32],
+        pos,
         lineage_id,
         starter_type,
         energy,
@@ -308,14 +338,14 @@ mod tests {
 
     #[test]
     fn parse_one_valid_record() {
-        let record = make_record(10.0, 20.0, 5.0, 42, 1, 3.14);
+        let record = make_record(10.0, 20.0, 5.0, 42, 1, 3.25);
         let meta = test_meta();
         let cell =
             parse_one_cell_record(&record, 0, &PathBuf::from("test.cells.bin"), &meta).unwrap();
         assert_eq!(cell.pos, [10, 20, 5]);
         assert_eq!(cell.lineage_id, 42);
         assert_eq!(cell.starter_type, 1);
-        assert!((cell.energy - 3.14).abs() < 0.001);
+        assert!((cell.energy - 3.25).abs() < 0.001);
     }
 
     #[test]
@@ -348,6 +378,7 @@ mod tests {
         let meta = test_meta();
         let err = parse_one_cell_record(&record, 0, &PathBuf::from("oob.bin"), &meta).unwrap_err();
         assert!(err.to_string().contains("out of bounds"));
+        assert!(err.to_string().contains("grid_x=128"));
     }
 
     #[test]
@@ -357,6 +388,14 @@ mod tests {
         let err =
             parse_one_cell_record(&record, 0, &PathBuf::from("nonint.bin"), &meta).unwrap_err();
         assert!(err.to_string().contains("not close to an integer"));
+    }
+
+    #[test]
+    fn parse_integral_position_uses_rounded_voxel() {
+        let record = make_record(0.9998, 2.0002, 3.0, 1, 0, 0.5);
+        let meta = test_meta();
+        let cell = parse_one_cell_record(&record, 0, &PathBuf::from("rounded.bin"), &meta).unwrap();
+        assert_eq!(cell.pos, [1, 2, 3]);
     }
 
     #[test]
@@ -394,6 +433,18 @@ mod tests {
     }
 
     #[test]
+    fn parse_tick_file_name_uses_metadata_pattern() {
+        assert_eq!(
+            parse_tick_file_name_with_pattern("snapshot_42.field.zst", "snapshot_<T>.field.zst"),
+            Some(42)
+        );
+        assert_eq!(
+            parse_tick_file_name_with_pattern("tick_42.field.bin", "snapshot_<T>.field.zst"),
+            None
+        );
+    }
+
+    #[test]
     fn discover_field_ticks_sorts_dedups() {
         // Use a directory under /tmp/opencode for testing
         let dir = std::path::Path::new("/tmp/opencode/io_test_discover");
@@ -411,12 +462,38 @@ mod tests {
         }
         // Also create some non-matching files
         fs::write(dir.join("tick_1.cells.bin"), b"data").unwrap();
-        fs::write(dir.join("run_meta.json"), b"{}").unwrap();
+        fs::write(
+            dir.join("run_meta.json"),
+            serde_json::to_vec(&test_meta()).unwrap(),
+        )
+        .unwrap();
 
         let ticks = discover_field_ticks(dir).unwrap();
         assert_eq!(ticks, vec![3, 42, 100]);
 
         // Cleanup
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn discover_field_ticks_uses_run_meta_pattern() {
+        let dir = std::path::Path::new("/tmp/opencode/io_test_discover_pattern");
+        let _ = fs::remove_dir_all(dir);
+        fs::create_dir_all(dir).unwrap();
+
+        let mut meta = test_meta();
+        meta.field_file_pattern = "snapshot_<T>.field.raw".to_string();
+        fs::write(
+            dir.join("run_meta.json"),
+            serde_json::to_vec(&meta).unwrap(),
+        )
+        .unwrap();
+        fs::write(dir.join("snapshot_7.field.raw"), b"data").unwrap();
+        fs::write(dir.join("tick_99.field.bin"), b"ignored").unwrap();
+
+        let ticks = discover_field_ticks(dir).unwrap();
+        assert_eq!(ticks, vec![7]);
+
         let _ = fs::remove_dir_all(dir);
     }
 
@@ -468,11 +545,11 @@ mod tests {
     /// Helper: parse cells from in-memory bytes for testing.
     fn load_cell_records_from_bytes(
         raw: &[u8],
-        path: &PathBuf,
+        path: &Path,
         meta: &RunMeta,
     ) -> Result<Vec<LoadedCell>, Box<dyn Error>> {
         let stride = marl_format::CELL_RECORD_STRIDE as usize;
-        if raw.len() % stride != 0 {
+        if !raw.len().is_multiple_of(stride) {
             return Err(format!(
                 "{} length {} is not a multiple of cell record stride {}",
                 path.display(),

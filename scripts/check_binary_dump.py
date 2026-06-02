@@ -13,6 +13,8 @@ from pathlib import Path
 
 def resolve_pattern(meta: dict, key: str, tick: int, default: str) -> Path:
     pattern = str(meta.get(key, default))
+    if "<T>" not in pattern:
+        raise SystemExit(f"{key} must contain <T> tick placeholder: {pattern!r}")
     return Path(pattern.replace("<T>", str(tick)))
 
 
@@ -65,8 +67,10 @@ def check_full_ruleset(run_dir: Path, meta: dict, tick: int) -> None:
         raise SystemExit(
             f"full ruleset version mismatch: got {version}, expected {expected_version}"
         )
+    if flags != 0:
+        raise SystemExit(f"full ruleset flags mismatch: got {flags}, expected 0")
 
-    expected_ruleset_size = int(meta.get("ruleset_full_ruleset_byte_size", 0))
+    expected_ruleset_size = int(meta.get("ruleset_full_ruleset_byte_size", 536))
     if ruleset_byte_size != expected_ruleset_size:
         raise SystemExit(
             f"full ruleset byte size mismatch: got {ruleset_byte_size}, expected {expected_ruleset_size}"
@@ -111,6 +115,12 @@ def check_full_ruleset(run_dir: Path, meta: dict, tick: int) -> None:
     )
 
 
+def require_meta_value(meta: dict, key: str, expected: object) -> None:
+    actual = meta.get(key)
+    if actual != expected:
+        raise SystemExit(f"metadata {key} mismatch: got {actual!r}, expected {expected!r}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("run_dir", type=Path, help="Output run directory")
@@ -130,13 +140,15 @@ def main() -> None:
     meta_path = args.run_dir / "run_meta.json"
 
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    require_meta_value(meta, "endianness", "little")
+    require_meta_value(meta, "field_dtype", "f32")
+    require_meta_value(meta, "field_layout", "z_y_x_species")
     field_path = args.run_dir / resolve_pattern(
         meta, "field_file_pattern", args.tick, "tick_<T>.field.bin"
     )
-    cells_path = args.run_dir / resolve_pattern(
-        meta, "cell_file_pattern", args.tick, "tick_<T>.cells.bin"
-    )
 
+    if not bool(meta.get("write_binary_field", True)):
+        raise SystemExit("write_binary_field is false; no field snapshot is expected")
     expected_field_bytes = int(meta["field_byte_len"])
     field_payload = read_maybe_compressed(field_path)
     field_bytes = len(field_payload)
@@ -144,18 +156,28 @@ def main() -> None:
         raise SystemExit(
             f"field size mismatch: got {field_bytes}, expected {expected_field_bytes}"
         )
+    if field_bytes < 4:
+        raise SystemExit(f"field file too small to contain one f32: {field_bytes} bytes")
 
     first = struct.unpack("<f", field_payload[:4])[0]
     if not math.isfinite(first):
         raise SystemExit(f"first field value is not finite: {first!r}")
 
     stride = int(meta["cell_record_stride"])
-    cell_payload = read_maybe_compressed(cells_path)
-    cell_bytes = len(cell_payload)
-    if cell_bytes % stride != 0:
-        raise SystemExit(
-            f"cell file size {cell_bytes} is not divisible by stride {stride}"
+    if stride != 25:
+        raise SystemExit(f"cell_record_stride mismatch: got {stride}, expected 25")
+    if bool(meta.get("write_binary_cells", True)):
+        cells_path = args.run_dir / resolve_pattern(
+            meta, "cell_file_pattern", args.tick, "tick_<T>.cells.bin"
         )
+        cell_payload = read_maybe_compressed(cells_path)
+        cell_bytes = len(cell_payload)
+        if cell_bytes % stride != 0:
+            raise SystemExit(
+                f"cell file size {cell_bytes} is not divisible by stride {stride}"
+            )
+    else:
+        cell_bytes = 0
 
     ruleset_mode = str(meta.get("ruleset_output_mode", "off"))
     if args.require_rulesets or ruleset_mode in ("layer_averages", "both"):

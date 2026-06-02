@@ -229,13 +229,13 @@ Output cadence, directories, and format toggles:
 
 Runs write into `output_dir` (default: `output/run_128x128x64`).
 
-### Always produced
+### Binary viewer outputs
 
 | File | Format | Description |
 |------|--------|-------------|
 | `run_meta.json` | JSON | Grid dimensions, species counts, binary byte layouts, snapshot interval |
-| `tick_<T>.field.bin.zst` | zstd-compressed raw f32 LE | Full extracellular field in `[z][y][x][species]` order |
-| `tick_<T>.cells.bin.zst` | zstd-compressed packed binary | Sparse cell records (pos, lineage_id, starter_type, energy) |
+| `tick_<T>.field.bin.zst` | zstd-compressed raw f32 LE | Full extracellular field in `[z][y][x][species]` order when `write_binary_field = true` |
+| `tick_<T>.cells.bin.zst` | zstd-compressed packed binary | Sparse cell records (pos, lineage_id, starter_type, energy) when `write_binary_cells = true` |
 | `summary.md` | Markdown | End-of-run population, chemistry, and configuration summary |
 
 ### Opt-in via `marl.toml`
@@ -265,6 +265,7 @@ See [`docs/SCRIPTS.md`](SCRIPTS.md) for details.
 - Set `binary_compression = "none"` to restore legacy raw `.bin` files.
 - The viewer auto-detects both raw and `.zst` snapshots from `run_meta.json`.
 - `field_byte_len` in `run_meta.json` always describes the **decompressed** field size.
+- The viewer requires `write_binary_field = true`; cell overlays are skipped when `write_binary_cells = false`.
 
 ---
 
@@ -303,8 +304,9 @@ category from the initial seeding, **not** an inferred genotype-level species:
 - **Blue** — anaerobe
 - **Magenta** — other/unknown
 
-Cell rendering requires `write_binary_cells = true` in the engine output config
-(enabled by default).
+Cell rendering requires `write_binary_cells = true` in the output config
+(enabled by default). The viewer still opens field-only snapshots when cell
+output is disabled.
 
 ### Legacy top-down field-only rendering
 
@@ -448,8 +450,10 @@ system doesn't have GPU drivers, try:
 
 ### Viewer says "no snapshot loaded"
 
-The output directory doesn't contain `run_meta.json` or has no `tick_*.field.bin`
-files. Verify the path and that the engine has written at least one snapshot.
+The output directory doesn't contain `run_meta.json`, `write_binary_field` is
+disabled, or the metadata's `field_file_pattern` does not resolve to an
+existing snapshot for the selected tick. Verify the path and that the engine has
+written at least one binary field snapshot.
 Use the GUI `Open…` button or text field to navigate to a valid directory.
 
 ### "grid dimensions in run_meta.json don't match compile-time constants"

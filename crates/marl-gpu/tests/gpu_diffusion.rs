@@ -38,6 +38,23 @@ fn occupancy_boundary_adjacent() -> Vec<bool> {
     occupancy
 }
 
+fn occupancy_boundary_faces_edges_and_corners() -> Vec<bool> {
+    let mut occupancy = occupancy_empty();
+    let points = [
+        (0, 0, 0),
+        (GRID_X - 1, 0, 0),
+        (0, GRID_Y - 1, 0),
+        (0, 0, GRID_Z - 1),
+        (GRID_X / 2, 0, GRID_Z / 2),
+        (0, GRID_Y / 2, GRID_Z / 2),
+        (GRID_X / 2, GRID_Y / 2, GRID_Z - 1),
+    ];
+    for (x, y, z) in points {
+        occupancy[voxel_idx(x, y, z)] = true;
+    }
+    occupancy
+}
+
 fn occupancy_dense_cluster() -> Vec<bool> {
     let mut occupancy = occupancy_empty();
     let cx = GRID_X / 2;
@@ -86,10 +103,7 @@ fn compare_fields(cpu: &Field, gpu: &Field, tolerance: f32) {
     );
 }
 
-fn run_case(label: &str, occupancy: Vec<bool>, substeps: usize) {
-    let mut sim = SimulationConfig::default();
-    sim.diffusion_substeps = substeps;
-
+fn run_case_with_sim(label: &str, occupancy: Vec<bool>, sim: SimulationConfig) {
     let mut cpu_field = Field::new();
     init_field(&mut cpu_field);
     let mut gpu_field = cpu_field.clone();
@@ -109,6 +123,19 @@ fn run_case(label: &str, occupancy: Vec<bool>, substeps: usize) {
         .unwrap_or_else(|err| panic!("GPU diffusion failed for {label}: {err}"));
 
     compare_fields(&cpu_field, &gpu_field, 1e-4);
+}
+
+fn run_case(label: &str, occupancy: Vec<bool>, substeps: usize) {
+    let mut sim = SimulationConfig::default();
+    sim.diffusion_substeps = substeps;
+    run_case_with_sim(label, occupancy, sim);
+}
+
+fn run_case_with_stable_requested_substeps(label: &str, occupancy: Vec<bool>, substeps: usize) {
+    let mut sim = SimulationConfig::default();
+    sim.dt = 0.1 * substeps as f32;
+    sim.diffusion_substeps = substeps;
+    run_case_with_sim(label, occupancy, sim);
 }
 
 #[test]
@@ -131,13 +158,32 @@ fn gpu_matches_cpu_boundary_adjacent_occupancy() {
 }
 
 #[test]
+fn gpu_matches_cpu_boundary_faces_edges_and_corners() {
+    run_case(
+        "boundary faces, edges, and corners",
+        occupancy_boundary_faces_edges_and_corners(),
+        2,
+    );
+}
+
+#[test]
 fn gpu_matches_cpu_dense_cluster_occupancy() {
     run_case("dense cluster occupancy", occupancy_dense_cluster(), 2);
 }
 
 #[test]
-fn gpu_matches_cpu_single_substep_ping_pong() {
-    run_case("single substep ping-pong", occupancy_center(), 1);
+fn gpu_matches_cpu_single_requested_substep() {
+    run_case_with_stable_requested_substeps("single requested substep", occupancy_center(), 1);
+}
+
+#[test]
+fn gpu_matches_cpu_odd_requested_substeps() {
+    run_case_with_stable_requested_substeps("odd requested substeps", occupancy_center(), 3);
+}
+
+#[test]
+fn gpu_matches_cpu_when_substep_request_is_stabilized() {
+    run_case("stabilized requested substep", occupancy_center(), 1);
 }
 
 #[test]
