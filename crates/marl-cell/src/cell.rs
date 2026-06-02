@@ -945,6 +945,51 @@ mod tests {
     }
 
     #[test]
+    fn stoich_audit_mode_preserves_tick_behavior() {
+        let mut ruleset = test_ruleset();
+        ruleset.reactions[0] = Reaction {
+            substrate: 2,
+            product: 3,
+            catalyst: 0,
+            cofactor: 1,
+            k_m: 0.01,
+            v_max: 100.0,
+            k_cat: 0.01,
+        };
+        let sim = SimulationConfig::default();
+        let mut plain = test_cell(ruleset.clone());
+        let mut audited = test_cell(ruleset);
+        plain.internal[1] = 10.0;
+        plain.internal[2] = 0.1;
+        audited.internal[1] = 10.0;
+        audited.internal[2] = 0.1;
+
+        let (plain_deltas, plain_event) = plain.tick(&[0.0; S_EXT], 0.0, &sim);
+        let mut ledger = StoichTickLedger::default();
+        let (audit_deltas, audit_event) =
+            audited.tick_with_stoich(&[0.0; S_EXT], 0.0, &sim, Some(&mut ledger));
+
+        assert_eq!(plain.pos, audited.pos);
+        assert_eq!(plain.lineage_id, audited.lineage_id);
+        assert_eq!(plain.age, audited.age);
+        assert_eq!(plain.quiescent, audited.quiescent);
+        assert_eq!(plain.starter_type, audited.starter_type);
+        assert_eq!(plain.prep_remaining, audited.prep_remaining);
+        for (lhs, rhs) in plain.internal.iter().zip(audited.internal.iter()) {
+            assert!((lhs - rhs).abs() < 1e-6);
+        }
+        for (lhs, rhs) in plain_deltas.iter().zip(audit_deltas.iter()) {
+            assert!((lhs - rhs).abs() < 1e-6);
+        }
+        assert_eq!(
+            std::mem::discriminant(&plain_event),
+            std::mem::discriminant(&audit_event)
+        );
+        assert_eq!(ledger.reaction_count, 1);
+        assert!((ledger.active_flux - 0.1).abs() < 1e-6);
+    }
+
+    #[test]
     fn mutation_keeps_light_as_catalyst_only_pseudo_species() {
         let mut ruleset = test_ruleset();
         ruleset.mutation_rate = 1.0;

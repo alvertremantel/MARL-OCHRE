@@ -414,4 +414,19 @@ mod tests {
         assert!(RulesetOutputMode::Full.writes_full_dump());
         assert!(RulesetOutputMode::Both.writes_full_dump());
     }
+
+    #[test]
+    fn stoich_output_flags_deserialize_from_toml() {
+        let cfg: Config = toml::from_str(
+            r#"
+            [output]
+            write_stoich_summary = true
+            write_stoich_tick_log = true
+            "#,
+        )
+        .unwrap();
+
+        assert!(cfg.output.write_stoich_summary);
+        assert!(cfg.output.write_stoich_tick_log);
+    }
 }

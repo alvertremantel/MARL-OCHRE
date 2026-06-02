@@ -90,6 +90,8 @@ pub struct StoichTickLedger {
     pub unknown_species_flux: f32,
     pub carbon_to_energy_flux: f32,
     pub reductant_to_energy_flux: f32,
+    pub gross_material_abs: f32,
+    pub gross_total_abs: f32,
     pub delta: StoichBudgetDelta,
 }
 
@@ -120,6 +122,8 @@ impl StoichTickLedger {
 
         self.reaction_count += 1;
         self.active_flux += flux;
+        self.gross_material_abs += delta.material_abs_sum();
+        self.gross_total_abs += delta.total_abs_sum();
         self.delta.add_delta(delta);
 
         let has_unknown = substrate_meta.role == SpeciesRole::Inactive
@@ -158,6 +162,8 @@ pub struct StoichRunLedger {
     pub unknown_species_flux: f32,
     pub carbon_to_energy_flux: f32,
     pub reductant_to_energy_flux: f32,
+    pub gross_material_abs: f32,
+    pub gross_total_abs: f32,
     pub delta: StoichBudgetDelta,
 }
 
@@ -170,11 +176,21 @@ impl StoichRunLedger {
         self.unknown_species_flux += tick.unknown_species_flux;
         self.carbon_to_energy_flux += tick.carbon_to_energy_flux;
         self.reductant_to_energy_flux += tick.reductant_to_energy_flux;
+        self.gross_material_abs += tick.gross_material_abs;
+        self.gross_total_abs += tick.gross_total_abs;
         self.delta.add_delta(tick.delta);
     }
 
     pub fn material_abs_sum(self) -> f32 {
+        self.gross_material_abs
+    }
+
+    pub fn net_material_abs_sum(self) -> f32 {
         self.delta.material_abs_sum()
+    }
+
+    pub fn total_abs_sum(self) -> f32 {
+        self.gross_total_abs
     }
 }
 
@@ -396,5 +412,27 @@ mod tests {
         let delta = ledger.record_legacy_reaction(8, 0, 5, NO_COFACTOR, 1.0);
         assert_eq!(delta.energy, 1.0);
         assert_eq!(ledger.unknown_species_flux, 1.0);
+    }
+
+    #[test]
+    fn gross_imbalance_accumulates_even_when_net_cancels() {
+        let mut run = StoichRunLedger::default();
+
+        let mut tick_a = StoichTickLedger::default();
+        tick_a.record_legacy_reaction(3, 0, LIGHT_INTERNAL_SPECIES as u8, NO_COFACTOR, 1.0);
+        run.add_tick(&tick_a);
+
+        let mut tick_b = StoichTickLedger::default();
+        tick_b.delta.c = 1.0;
+        tick_b.delta.o = 2.0;
+        tick_b.gross_material_abs = 3.0;
+        tick_b.gross_total_abs = 3.0;
+        run.add_tick(&tick_b);
+
+        assert_eq!(run.delta.c, 0.0);
+        assert_eq!(run.delta.o, 0.0);
+        assert_eq!(run.net_material_abs_sum(), 0.0);
+        assert_eq!(run.material_abs_sum(), 6.0);
+        assert_eq!(run.total_abs_sum(), 11.0);
     }
 }

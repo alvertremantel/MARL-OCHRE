@@ -189,7 +189,7 @@ impl DataLogger {
             let mut writer = BufWriter::new(file);
             writeln!(
                 writer,
-                "tick,reaction_count,active_flux,imbalanced_reaction_count,unknown_species_flux,carbon_to_energy_flux,reductant_to_energy_flux,delta_c,delta_h,delta_o,delta_s,delta_redox,delta_energy"
+                "tick,reaction_count,active_flux,imbalanced_reaction_count,unknown_species_flux,carbon_to_energy_flux,reductant_to_energy_flux,gross_material_abs,gross_total_abs,delta_c,delta_h,delta_o,delta_s,delta_redox,delta_energy"
             )?;
             writer.flush()?;
             Some(writer)
@@ -314,7 +314,7 @@ impl DataLogger {
 
         writeln!(
             writer,
-            "{},{},{:.6},{},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6}",
+            "{},{},{:.6},{},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6}",
             tick,
             ledger.reaction_count,
             ledger.active_flux,
@@ -322,6 +322,8 @@ impl DataLogger {
             ledger.unknown_species_flux,
             ledger.carbon_to_energy_flux,
             ledger.reductant_to_energy_flux,
+            ledger.gross_material_abs,
+            ledger.gross_total_abs,
             ledger.delta.c,
             ledger.delta.h,
             ledger.delta.o,
@@ -497,6 +499,8 @@ impl DataLogger {
             total_ticks: u32,
             ledger: &'a StoichRunLedger,
             material_abs_sum: f32,
+            net_material_abs_sum: f32,
+            gross_total_abs_sum: f32,
             notes: [&'static str; 3],
         }
 
@@ -507,6 +511,8 @@ impl DataLogger {
             total_ticks,
             ledger,
             material_abs_sum: ledger.material_abs_sum(),
+            net_material_abs_sum: ledger.net_material_abs_sum(),
+            gross_total_abs_sum: ledger.total_abs_sum(),
             notes: [
                 "legacy reactions are audited, not enforced",
                 "energy and light are non-material bookkeeping slots",
@@ -920,11 +926,14 @@ mod tests {
         let dir = PathBuf::from(&out_dir);
         let ticks = fs::read_to_string(dir.join("stoich_ticks.csv")).unwrap();
         assert!(ticks.contains("tick,reaction_count"));
-        assert!(ticks.contains("7,1,2.000000"));
+        assert!(ticks.contains("gross_material_abs,gross_total_abs"));
+        assert!(ticks.contains("7,1,2.000000,1,0.000000,2.000000,0.000000,6.000000,16.000000"));
 
         let summary = fs::read_to_string(dir.join("stoich_summary.json")).unwrap();
         assert!(summary.contains("\"total_ticks\": 8"));
         assert!(summary.contains("\"carbon_to_energy_flux\": 2.0"));
+        assert!(summary.contains("\"material_abs_sum\": 6.0"));
+        assert!(summary.contains("\"gross_total_abs_sum\": 16.0"));
 
         let _ = fs::remove_dir_all(&dir);
     }

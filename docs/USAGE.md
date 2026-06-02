@@ -245,8 +245,8 @@ Runs write into `output_dir` (default: `output/run_128x128x64`).
 | File | Requires | Description |
 |------|----------|-------------|
 | `ticks.csv` | `write_tick_log = true` | Per-tick population and z-layer counts |
-| `stoich_summary.json` | `write_stoich_summary = true` | End-of-run audit of material, redox, and energy-equivalent imbalance in legacy reactions |
-| `stoich_ticks.csv` | `write_stoich_tick_log = true` | Per-tick stoichiometry audit totals |
+| `stoich_summary.json` | `write_stoich_summary = true` | End-of-run audit of legacy intracellular reactions, including gross imbalance totals and net signed deltas |
+| `stoich_ticks.csv` | `write_stoich_tick_log = true` | Per-tick stoichiometry audit totals with gross imbalance columns plus net signed deltas |
 | `tick_<T>.ruleset_layers.bin.zst` | `ruleset_output_mode = "layer_averages"` or `"both"` | Per-z-layer continuous ruleset-parameter averages |
 | `tick_<T>.rulesets.bin.zst` | `ruleset_output_mode = "full"` or `"both"` | Deduplicated per-cell full ruleset dump with dictionary |
 | `chem_<tick>.csv` | `write_csv_snapshots = true` | Full field dump as CSV |
@@ -262,6 +262,12 @@ python scripts/check_binary_dump.py output/run_128x128x64 0
 ```
 
 See [`docs/SCRIPTS.md`](SCRIPTS.md) for details.
+
+### Stoichiometry audit outputs
+
+- `stoich_ticks.csv` columns: `reaction_count`, `active_flux`, `imbalanced_reaction_count`, `unknown_species_flux`, `carbon_to_energy_flux`, `reductant_to_energy_flux`, `gross_material_abs`, `gross_total_abs`, then net signed `delta_*` budget columns.
+- `stoich_summary.json` reports the same run-level ledger, with `material_abs_sum` as the gross material imbalance magnitude, `gross_total_abs_sum` as the gross material plus redox plus energy magnitude, and `net_material_abs_sum` as the final signed material imbalance after cancellation.
+- These audits currently cover legacy intracellular reactions only. Transport, maintenance, secretion, diffusion, decay, and cell fate bookkeeping remain outside this first audit pass.
 
 ### Compression and viewer compatibility
 

@@ -490,8 +490,16 @@ pub fn run(cfg: Config, _use_gpu_diffusion: bool) {
 
 #[cfg(test)]
 mod tests {
-    use super::{cadence_due, validate_run_config};
+    use super::{cadence_due, run, validate_run_config};
     use marl_config::{Config, SimulationConfig};
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn test_output_dir(name: &str) -> String {
+        let dir = std::env::temp_dir().join(name);
+        let _ = fs::remove_dir_all(&dir);
+        dir.to_string_lossy().into_owned()
+    }
 
     #[test]
     fn zero_interval_disables_periodic_cadence_but_keeps_final_tick() {
@@ -519,5 +527,36 @@ mod tests {
 
         let err = validate_run_config(&cfg).unwrap_err();
         assert!(err.contains("k_eps"));
+    }
+
+    #[test]
+    fn stoich_output_flags_write_expected_files() {
+        let out_dir = test_output_dir("marl_sim_stoich_output_test");
+        let mut cfg = Config::default();
+        cfg.output.output_dir = out_dir.clone();
+        cfg.output.max_ticks = 1;
+        cfg.output.stats_interval = 0;
+        cfg.output.snapshot_interval = 0;
+        cfg.output.image_interval = 0;
+        cfg.output.seed_count = 1;
+        cfg.output.write_binary_field = false;
+        cfg.output.write_binary_cells = false;
+        cfg.output.write_stoich_summary = true;
+        cfg.output.write_stoich_tick_log = true;
+        cfg.output.write_ancestry_map = false;
+        cfg.output.write_density_map = false;
+
+        run(cfg, false);
+
+        let dir = PathBuf::from(&out_dir);
+        assert!(dir.join("stoich_summary.json").exists());
+        assert!(dir.join("stoich_ticks.csv").exists());
+
+        let summary = fs::read_to_string(dir.join("stoich_summary.json")).unwrap();
+        assert!(summary.contains("\"gross_total_abs_sum\""));
+        let ticks = fs::read_to_string(dir.join("stoich_ticks.csv")).unwrap();
+        assert!(ticks.contains("gross_material_abs,gross_total_abs"));
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }
