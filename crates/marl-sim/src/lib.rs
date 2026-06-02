@@ -4,6 +4,7 @@ pub mod starter_metabolisms;
 pub mod stats;
 
 use marl_cell::cell::*;
+use marl_config::stoich::{StoichRunLedger, StoichTickLedger};
 use marl_config::*;
 use marl_field::field::{Field, validate_diffusion_config};
 use marl_field::light::LightField;
@@ -52,9 +53,15 @@ pub fn run(cfg: Config, _use_gpu_diffusion: bool) {
     let mut field = Field::new();
     let mut light = LightField::new();
 
+    let writes_stoich = cfg.output.write_stoich_summary || cfg.output.write_stoich_tick_log;
+
     // Create the data logger for optional CSV diagnostics and summaries.
-    let mut logger = DataLogger::new(&cfg.output.output_dir, cfg.output.write_tick_log)
-        .expect("Failed to create data logger / output directory");
+    let mut logger = DataLogger::new(
+        &cfg.output.output_dir,
+        cfg.output.write_tick_log,
+        cfg.output.write_stoich_tick_log,
+    )
+    .expect("Failed to create data logger / output directory");
     let writes_binary = cfg.output.write_binary_field
         || cfg.output.write_binary_cells
         || cfg.output.ruleset_output_mode.is_enabled();
@@ -172,6 +179,7 @@ pub fn run(cfg: Config, _use_gpu_diffusion: bool) {
     let mut tick_divisions: u64;
     let mut tick_deaths: u64;
     let mut occupancy = vec![false; GRID_X * GRID_Y * GRID_Z];
+    let mut stoich_run = StoichRunLedger::default();
 
     for tick in 0..cfg.output.max_ticks {
         tick_divisions = 0;
@@ -218,6 +226,7 @@ pub fn run(cfg: Config, _use_gpu_diffusion: bool) {
         // Each cell runs the 5-phase tick (receptor, transport, reactions,
         // effector, fate) and returns field deltas + a fate event.
         let mut events: Vec<(usize, CellEvent)> = Vec::with_capacity(cells.len());
+        let mut tick_stoich = StoichTickLedger::default();
 
         for (i, cell) in cells.iter_mut().enumerate() {
             let p = cell.pos;
@@ -226,10 +235,21 @@ pub fn run(cfg: Config, _use_gpu_diffusion: bool) {
             let ext = read_neighbor_environment(p, &field, &cell_map);
             let l = light.get(p[0] as usize, p[1] as usize, p[2] as usize);
 
-            let (deltas, event) = cell.tick(&ext, l, sim);
+            let (deltas, event) = if writes_stoich {
+                cell.tick_with_stoich(&ext, l, sim, Some(&mut tick_stoich))
+            } else {
+                cell.tick(&ext, l, sim)
+            };
             // Secretion/consumption distributed to neighboring empty voxels
             apply_deltas_to_neighbors(p, &mut field, &cell_map, &deltas);
             events.push((i, event));
+        }
+
+        if writes_stoich {
+            stoich_run.add_tick(&tick_stoich);
+            if let Err(e) = logger.log_stoich_tick(tick as u64, &tick_stoich) {
+                eprintln!("Warning: failed to log stoichiometry tick {}: {}", tick, e);
+            }
         }
 
         // === STEP 5: Process fate events ===
@@ -440,6 +460,17 @@ pub fn run(cfg: Config, _use_gpu_diffusion: bool) {
             println!(
                 "Reaction registry: {} unique topologies observed",
                 logger.registry.count()
+            );
+        }
+    }
+
+    if cfg.output.write_stoich_summary {
+        if let Err(e) = logger.write_stoich_summary(cfg.output.max_ticks, &stoich_run) {
+            eprintln!("Warning: failed to write stoichiometry summary: {}", e);
+        } else {
+            println!(
+                "Stoichiometry summary written to {}/stoich_summary.json",
+                cfg.output.output_dir
             );
         }
     }

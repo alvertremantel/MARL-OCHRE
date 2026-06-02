@@ -37,6 +37,7 @@
 //!    - Energy < quiescence_energy → go dormant (skip effectors)
 //!    - Otherwise → active
 
+use marl_config::stoich::StoichTickLedger;
 use marl_config::*;
 
 const LIGHT_SPECIES: usize = M_INT - 1;
@@ -198,6 +199,16 @@ impl CellState {
         ext_conc: &[f32; S_EXT],
         light: f32,
         sim: &SimulationConfig,
+    ) -> ([f32; S_EXT], CellEvent) {
+        self.tick_with_stoich(ext_conc, light, sim, None)
+    }
+
+    pub fn tick_with_stoich(
+        &mut self,
+        ext_conc: &[f32; S_EXT],
+        light: f32,
+        sim: &SimulationConfig,
+        mut stoich: Option<&mut StoichTickLedger>,
     ) -> ([f32; S_EXT], CellEvent) {
         let mut field_deltas = [0.0f32; S_EXT];
         // Cell tick runs once per full tick
@@ -395,6 +406,15 @@ impl CellState {
                 self.internal[cof_idx] -= 0.5 * flux;
             }
             self.internal[prod_idx] += flux;
+            if let Some(ledger) = stoich.as_deref_mut() {
+                ledger.record_legacy_reaction(
+                    rxn.substrate,
+                    rxn.product,
+                    rxn.catalyst,
+                    rxn.cofactor,
+                    flux,
+                );
+            }
         }
 
         // Maintenance energy drain: each tick, the cell loses lambda_maintenance

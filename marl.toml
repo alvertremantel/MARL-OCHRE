@@ -83,6 +83,8 @@ ruleset_output_mode = "off"          # "off" | "layer_averages" | "full" | "both
 # diagnostics instead of full-fidelity viewer ingestion.
 write_tick_log = false
 write_csv_snapshots = false
+write_stoich_summary = false
+write_stoich_tick_log = false
 xz_snapshot_species = []
 xy_slice_depths_frac = []
 write_ancestry_map = false

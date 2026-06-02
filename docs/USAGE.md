@@ -218,6 +218,8 @@ Output cadence, directories, and format toggles:
 | `ruleset_output_mode` | string | `"off"` | `"off"` / `"layer_averages"` / `"full"` / `"both"` |
 | `write_tick_log` | bool | false | Write `ticks.csv` |
 | `write_csv_snapshots` | bool | false | Write per-tick CSV snapshots |
+| `write_stoich_summary` | bool | false | Write end-of-run physical stoichiometry audit summary |
+| `write_stoich_tick_log` | bool | false | Write per-tick physical stoichiometry audit CSV |
 | `xz_snapshot_species` | [usize] | [] | Species indices for XZ cross-section PPMs |
 | `xy_slice_depths_frac` | [f32] | [] | Fractional depths for XY slice PPMs |
 | `write_ancestry_map` | bool | false | Write ancestry-colored XZ PPMs |
@@ -243,6 +245,8 @@ Runs write into `output_dir` (default: `output/run_128x128x64`).
 | File | Requires | Description |
 |------|----------|-------------|
 | `ticks.csv` | `write_tick_log = true` | Per-tick population and z-layer counts |
+| `stoich_summary.json` | `write_stoich_summary = true` | End-of-run audit of material, redox, and energy-equivalent imbalance in legacy reactions |
+| `stoich_ticks.csv` | `write_stoich_tick_log = true` | Per-tick stoichiometry audit totals |
 | `tick_<T>.ruleset_layers.bin.zst` | `ruleset_output_mode = "layer_averages"` or `"both"` | Per-z-layer continuous ruleset-parameter averages |
 | `tick_<T>.rulesets.bin.zst` | `ruleset_output_mode = "full"` or `"both"` | Deduplicated per-cell full ruleset dump with dictionary |
 | `chem_<tick>.csv` | `write_csv_snapshots = true` | Full field dump as CSV |

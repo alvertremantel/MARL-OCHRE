@@ -21,6 +21,7 @@ use std::io::{BufWriter, Result, Write};
 use std::path::{Path, PathBuf};
 
 use marl_cell::cell::*;
+use marl_config::stoich::{StoichRunLedger, StoichTickLedger};
 use marl_config::*;
 use marl_field::field::Field;
 use marl_field::light::LightField;
@@ -133,6 +134,9 @@ pub struct DataLogger {
     /// only pay the file-open cost once.
     ticks_writer: Option<BufWriter<File>>,
 
+    /// Optional compact stoichiometry audit tick log.
+    stoich_writer: Option<BufWriter<File>>,
+
     /// Registry mapping reaction topologies to stable integer IDs.
     /// Populated incrementally as new topologies are observed.
     pub registry: ReactionRegistry,
@@ -146,7 +150,11 @@ impl DataLogger {
     ///
     /// # Errors
     /// Returns `std::io::Error` if directory creation or file opening fails.
-    pub fn new(output_dir: &str, write_tick_log: bool) -> Result<Self> {
+    pub fn new(
+        output_dir: &str,
+        write_tick_log: bool,
+        write_stoich_tick_log: bool,
+    ) -> Result<Self> {
         // Create the output directory (and any missing parents).
         let dir = PathBuf::from(output_dir);
         fs::create_dir_all(&dir)?;
@@ -175,9 +183,24 @@ impl DataLogger {
             None
         };
 
+        let stoich_writer = if write_stoich_tick_log {
+            let stoich_path = dir.join("stoich_ticks.csv");
+            let file = File::create(&stoich_path)?;
+            let mut writer = BufWriter::new(file);
+            writeln!(
+                writer,
+                "tick,reaction_count,active_flux,imbalanced_reaction_count,unknown_species_flux,carbon_to_energy_flux,reductant_to_energy_flux,delta_c,delta_h,delta_o,delta_s,delta_redox,delta_energy"
+            )?;
+            writer.flush()?;
+            Some(writer)
+        } else {
+            None
+        };
+
         Ok(Self {
             output_dir: dir,
             ticks_writer,
+            stoich_writer,
             registry: ReactionRegistry::new(),
         })
     }
@@ -282,6 +305,31 @@ impl DataLogger {
         writer.flush()?;
 
         Ok(())
+    }
+
+    pub fn log_stoich_tick(&mut self, tick: u64, ledger: &StoichTickLedger) -> Result<()> {
+        let Some(writer) = self.stoich_writer.as_mut() else {
+            return Ok(());
+        };
+
+        writeln!(
+            writer,
+            "{},{},{:.6},{},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6}",
+            tick,
+            ledger.reaction_count,
+            ledger.active_flux,
+            ledger.imbalanced_reaction_count,
+            ledger.unknown_species_flux,
+            ledger.carbon_to_energy_flux,
+            ledger.reductant_to_energy_flux,
+            ledger.delta.c,
+            ledger.delta.h,
+            ledger.delta.o,
+            ledger.delta.s,
+            ledger.delta.redox,
+            ledger.delta.energy,
+        )?;
+        writer.flush()
     }
 
     /// Write a per-z-layer chemistry snapshot to `chem_<tick>.csv`.
@@ -441,6 +489,31 @@ impl DataLogger {
     /// Write the reaction registry to disk. Call at end of run.
     pub fn write_registry(&self) -> Result<()> {
         self.registry.write_registry(&self.output_dir)
+    }
+
+    pub fn write_stoich_summary(&self, total_ticks: u32, ledger: &StoichRunLedger) -> Result<()> {
+        #[derive(serde::Serialize)]
+        struct StoichSummary<'a> {
+            total_ticks: u32,
+            ledger: &'a StoichRunLedger,
+            material_abs_sum: f32,
+            notes: [&'static str; 3],
+        }
+
+        let path = self.output_dir.join("stoich_summary.json");
+        let file = File::create(&path)?;
+        let writer = BufWriter::new(file);
+        let summary = StoichSummary {
+            total_ticks,
+            ledger,
+            material_abs_sum: ledger.material_abs_sum(),
+            notes: [
+                "legacy reactions are audited, not enforced",
+                "energy and light are non-material bookkeeping slots",
+                "inactive species contribute to unknown_species_flux",
+            ],
+        };
+        serde_json::to_writer_pretty(writer, &summary).map_err(std::io::Error::other)
     }
 
     // ========================================================================
@@ -819,5 +892,40 @@ impl DataLogger {
 
         w.flush()?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_output_dir(name: &str) -> String {
+        let dir = std::env::temp_dir().join(name);
+        let _ = fs::remove_dir_all(&dir);
+        dir.to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn stoich_tick_log_and_summary_are_written() {
+        let out_dir = test_output_dir("marl_output_stoich_audit_test");
+        let mut logger = DataLogger::new(&out_dir, false, true).unwrap();
+        let mut tick = StoichTickLedger::default();
+        tick.record_legacy_reaction(3, 0, 15, 0xFF, 2.0);
+
+        logger.log_stoich_tick(7, &tick).unwrap();
+        let mut run = StoichRunLedger::default();
+        run.add_tick(&tick);
+        logger.write_stoich_summary(8, &run).unwrap();
+
+        let dir = PathBuf::from(&out_dir);
+        let ticks = fs::read_to_string(dir.join("stoich_ticks.csv")).unwrap();
+        assert!(ticks.contains("tick,reaction_count"));
+        assert!(ticks.contains("7,1,2.000000"));
+
+        let summary = fs::read_to_string(dir.join("stoich_summary.json")).unwrap();
+        assert!(summary.contains("\"total_ticks\": 8"));
+        assert!(summary.contains("\"carbon_to_energy_flux\": 2.0"));
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

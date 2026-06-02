@@ -3,6 +3,8 @@
 //! This crate has no simulation dependencies — it is a pure data crate
 //! consumed by every other crate in the workspace.
 
+pub mod stoich;
+
 // ============================================================================
 // GRID DIMENSIONS — compile-time constants
 // ============================================================================
@@ -168,9 +170,10 @@ impl Default for SimulationConfig {
 }
 
 /// Logging cadence, snapshot selection, image toggles, and output directory.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BinaryCompression {
+    #[default]
     None,
     Zstd,
 }
@@ -184,15 +187,10 @@ impl BinaryCompression {
     }
 }
 
-impl Default for BinaryCompression {
-    fn default() -> Self {
-        Self::None
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RulesetOutputMode {
+    #[default]
     Off,
     LayerAverages,
     Full,
@@ -222,12 +220,6 @@ impl RulesetOutputMode {
     }
 }
 
-impl Default for RulesetOutputMode {
-    fn default() -> Self {
-        Self::Off
-    }
-}
-
 /// Logging cadence, snapshot selection, image toggles, and output directory.
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(default)]
@@ -254,6 +246,8 @@ pub struct OutputConfig {
     pub ruleset_output_mode: RulesetOutputMode,
     pub write_tick_log: bool,
     pub write_csv_snapshots: bool,
+    pub write_stoich_summary: bool,
+    pub write_stoich_tick_log: bool,
     pub write_ancestry_map: bool,
     pub write_density_map: bool,
 }
@@ -277,6 +271,8 @@ impl Default for OutputConfig {
             ruleset_output_mode: RulesetOutputMode::Off,
             write_tick_log: false,
             write_csv_snapshots: false,
+            write_stoich_summary: false,
+            write_stoich_tick_log: false,
             write_ancestry_map: false,
             write_density_map: false,
         }
@@ -388,6 +384,8 @@ mod tests {
         assert_eq!(out.binary_compression_level, 3);
         assert_eq!(out.ruleset_interval, 1000);
         assert_eq!(out.ruleset_output_mode, RulesetOutputMode::Off);
+        assert!(!out.write_stoich_summary);
+        assert!(!out.write_stoich_tick_log);
     }
 
     #[test]

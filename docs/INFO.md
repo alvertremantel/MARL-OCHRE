@@ -273,7 +273,9 @@ The project is in a good prototype state. It is not a toy, but it is also not ye
 
 Several current simplifications matter if this code is used for serious experimental interpretation.
 
-- There is no explicit mass-balance or stoichiometric chemistry.
+- Bookkeeping conservation is enforced in the current cell update path: accepted uptake, secretion, reaction flux, cofactor consumption, and division splits are bounded by available pools.
+- Physical stoichiometry is audited, not enforced. Optional `stoich_summary.json` and `stoich_ticks.csv` outputs report C/H/O/S-style material, redox, and energy-equivalent imbalances for legacy reactions.
+- Strict balanced-reaction enforcement is still future work; current starter metabolisms remain abstract and comparable to prior runs unless stoichiometry outputs are enabled.
 - Dead cells are removed; their internals are not lysed back into the field.
 - Quiescence is partial rather than a deep dormancy mode.
 - Cells are updated sequentially with immediate field writes inside each tick.
