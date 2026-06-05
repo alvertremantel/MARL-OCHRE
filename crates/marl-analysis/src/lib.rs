@@ -74,6 +74,8 @@ pub struct RunComparisonEntry {
     pub deep_fraction: Option<f64>,
     pub genotype_unique_count: Option<u32>,
     pub genotype_dominant_fraction: Option<f64>,
+    pub transporter_active_per_cell: Option<f64>,
+    pub transporter_gated_slots: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -148,6 +150,41 @@ pub struct RulesetSummary {
     pub dominant_count: u32,
     pub dominant_fraction: f64,
     pub shannon_diversity: f64,
+    pub transporters: TransporterSummary,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TransporterSummary {
+    pub active_slots: u64,
+    pub avg_active_per_cell: f64,
+    pub uptake_dominant_slots: u64,
+    pub secretion_dominant_slots: u64,
+    pub bidirectional_slots: u64,
+    pub gated_slots: u64,
+    pub avg_abs_gate_weight: f64,
+    pub uptake_rate_sum: f64,
+    pub secretion_rate_sum: f64,
+    pub common_pairs: Vec<TransportPairSummary>,
+    pub dominant_genotype: Option<GenotypeTransportSummary>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TransportPairSummary {
+    pub ext_species: u8,
+    pub int_species: u8,
+    pub active_slots: u64,
+    pub avg_uptake_rate: f64,
+    pub avg_secrete_rate: f64,
+    pub gated_slots: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GenotypeTransportSummary {
+    pub dict_id: u32,
+    pub active_slots: u32,
+    pub gated_slots: u32,
+    pub uptake_dominant_slots: u32,
+    pub secretion_dominant_slots: u32,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -175,6 +212,40 @@ struct TickRow {
     divisions: u64,
     deaths: u64,
     z_counts: Vec<u64>,
+}
+
+const RULESET_FULL_FORMAT_VERSION_V1: u32 = 1;
+const RULESET_FULL_CANONICAL_SIZE_V1: u32 = 536;
+const TRANSPORTER_COUNT: usize = 8;
+const RECEPTOR_PAYLOAD_BYTES: usize = 8 * 12;
+const TRANSPORT_V1_STRIDE: usize = 10;
+const TRANSPORT_V2_STRIDE: usize = 15;
+const ACTIVE_TRANSPORT_THRESHOLD: f32 = 1e-9;
+const MAX_COMMON_TRANSPORT_PAIRS: usize = 8;
+
+#[derive(Debug, Clone, Copy)]
+struct ParsedTransporter {
+    uptake_rate: f32,
+    secrete_rate: f32,
+    ext_species: u8,
+    int_species: u8,
+    gate_weight: f32,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct GenotypeTransportStats {
+    active_slots: u32,
+    gated_slots: u32,
+    uptake_dominant_slots: u32,
+    secretion_dominant_slots: u32,
+}
+
+#[derive(Debug, Clone, Default)]
+struct TransportPairAccumulator {
+    active_slots: u64,
+    uptake_rate_sum: f64,
+    secrete_rate_sum: f64,
+    gated_slots: u64,
 }
 
 pub fn analyze_run(run_dir: impl AsRef<Path>, cfg: &AnalysisConfig) -> AnalysisResult<RunAnalysis> {
@@ -374,6 +445,29 @@ pub fn render_run_terminal(analysis: &RunAnalysis) -> String {
             rulesets.dominant_fraction * 100.0,
             rulesets.shannon_diversity
         ));
+        out.push_str(&format!(
+            "  transporters: active {:.2}/cell, gated {} slots, uptake_dom={}, secretion_dom={}\n",
+            rulesets.transporters.avg_active_per_cell,
+            rulesets.transporters.gated_slots,
+            rulesets.transporters.uptake_dominant_slots,
+            rulesets.transporters.secretion_dominant_slots
+        ));
+        if !rulesets.transporters.common_pairs.is_empty() {
+            let pairs = rulesets
+                .transporters
+                .common_pairs
+                .iter()
+                .take(3)
+                .map(|pair| {
+                    format!(
+                        "ext{}->int{}:{}",
+                        pair.ext_species, pair.int_species, pair.active_slots
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            out.push_str(&format!("  common transporter pairs: {pairs}\n"));
+        }
     }
     for finding in &analysis.findings {
         out.push_str(&format!(
@@ -395,13 +489,15 @@ pub fn render_comparison_terminal(analysis: &ComparisonAnalysis) -> String {
     out.push_str("MARL run comparison\n");
     for run in &analysis.runs {
         out.push_str(&format!(
-            "  {}: final_pop={:?}, growth={:?}, top={:?}, dominant_genotype={:?}\n",
+            "  {}: final_pop={:?}, growth={:?}, top={:?}, dominant_genotype={:?}, active_transporters={:?}\n",
             run.name,
             run.final_population,
             run.growth_factor.map(|v| format!("{v:.2}x")),
             run.top_fraction.map(|v| format!("{:.1}%", v * 100.0)),
             run.genotype_dominant_fraction
-                .map(|v| format!("{:.1}%", v * 100.0))
+                .map(|v| format!("{:.1}%", v * 100.0)),
+            run.transporter_active_per_cell
+                .map(|v| format!("{v:.2}/cell"))
         ));
     }
     for finding in &analysis.findings {
@@ -489,6 +585,43 @@ pub fn render_run_markdown(analysis: &RunAnalysis) -> String {
             rulesets.dominant_fraction * 100.0,
             rulesets.shannon_diversity
         ));
+        out.push_str(&format!(
+            "- Active transporter slots: {} ({:.2} per cell)\n- Gated active slots: {} (avg |gate_weight| {:.3})\n- Uptake/secretion dominant active slots: {}/{}\n- Bidirectional active slots: {}\n",
+            rulesets.transporters.active_slots,
+            rulesets.transporters.avg_active_per_cell,
+            rulesets.transporters.gated_slots,
+            rulesets.transporters.avg_abs_gate_weight,
+            rulesets.transporters.uptake_dominant_slots,
+            rulesets.transporters.secretion_dominant_slots,
+            rulesets.transporters.bidirectional_slots
+        ));
+        if let Some(dominant) = &rulesets.transporters.dominant_genotype {
+            out.push_str(&format!(
+                "- Dominant genotype transport: {} active slots, {} gated, uptake/secretion dominant {}/{}\n",
+                dominant.active_slots,
+                dominant.gated_slots,
+                dominant.uptake_dominant_slots,
+                dominant.secretion_dominant_slots
+            ));
+        }
+        if !rulesets.transporters.common_pairs.is_empty() {
+            out.push_str("\n### Common Transporter Pairs\n\n");
+            out.push_str(
+                "| ext | int | active_slots | avg_uptake | avg_secretion | gated_slots |\n",
+            );
+            out.push_str("|---:|---:|---:|---:|---:|---:|\n");
+            for pair in &rulesets.transporters.common_pairs {
+                out.push_str(&format!(
+                    "| {} | {} | {} | {:.3} | {:.3} | {} |\n",
+                    pair.ext_species,
+                    pair.int_species,
+                    pair.active_slots,
+                    pair.avg_uptake_rate,
+                    pair.avg_secrete_rate,
+                    pair.gated_slots
+                ));
+            }
+        }
     }
     out.push_str("\n## Findings\n\n");
     if analysis.findings.is_empty() {
@@ -516,11 +649,11 @@ pub fn render_run_markdown(analysis: &RunAnalysis) -> String {
 pub fn render_comparison_markdown(analysis: &ComparisonAnalysis) -> String {
     let mut out = String::new();
     out.push_str("# MARL Run Comparison\n\n");
-    out.push_str("| run | final_pop | max_pop | growth | final_energy | top% | mid% | deep% | unique_genotypes | dominant_genotype% |\n");
-    out.push_str("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n");
+    out.push_str("| run | final_pop | max_pop | growth | final_energy | top% | mid% | deep% | unique_genotypes | dominant_genotype% | active_transporters/cell | gated_slots |\n");
+    out.push_str("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n");
     for run in &analysis.runs {
         out.push_str(&format!(
-            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
             run.name,
             display_opt_u64(run.final_population),
             display_opt_u64(run.max_population),
@@ -532,7 +665,11 @@ pub fn render_comparison_markdown(analysis: &ComparisonAnalysis) -> String {
             run.genotype_unique_count
                 .map(|v| v.to_string())
                 .unwrap_or_else(|| "n/a".to_string()),
-            display_opt_pct(run.genotype_dominant_fraction)
+            display_opt_pct(run.genotype_dominant_fraction),
+            display_opt_f64(run.transporter_active_per_cell),
+            run.transporter_gated_slots
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "n/a".to_string())
         ));
     }
     out.push_str("\n## Findings\n\n");
@@ -875,14 +1012,26 @@ fn parse_ruleset_summary(tick: u64, bytes: &[u8]) -> AnalysisResult<RulesetSumma
     let unique_count = u32::from_le_bytes(bytes[12..16].try_into().unwrap());
     let cell_count = u32::from_le_bytes(bytes[16..20].try_into().unwrap());
     let ruleset_size = u32::from_le_bytes(bytes[20..24].try_into().unwrap());
-    if version != RULESET_FULL_FORMAT_VERSION {
-        return Err(format!("ruleset version mismatch: {version}").into());
+    let transport_stride = match (version, ruleset_size) {
+        (RULESET_FULL_FORMAT_VERSION, RULESET_FULL_CANONICAL_SIZE) => TRANSPORT_V2_STRIDE,
+        (RULESET_FULL_FORMAT_VERSION_V1, RULESET_FULL_CANONICAL_SIZE_V1) => TRANSPORT_V1_STRIDE,
+        _ => {
+            return Err(format!(
+                "ruleset version/size mismatch: version {version}, size {ruleset_size}"
+            )
+            .into());
+        }
+    };
+    if usize::try_from(ruleset_size)
+        .ok()
+        .is_none_or(|size| size < RECEPTOR_PAYLOAD_BYTES + TRANSPORTER_COUNT * transport_stride)
+    {
+        return Err(
+            format!("ruleset size too small for transporter payload: {ruleset_size}").into(),
+        );
     }
     if flags != 0 {
         return Err(format!("ruleset flags must be zero, got {flags}").into());
-    }
-    if ruleset_size != RULESET_FULL_CANONICAL_SIZE {
-        return Err(format!("ruleset size mismatch: {ruleset_size}").into());
     }
 
     let refs_off =
@@ -921,6 +1070,14 @@ fn parse_ruleset_summary(tick: u64, bytes: &[u8]) -> AnalysisResult<RulesetSumma
     } else {
         0.0
     };
+    let transporters = summarize_transporters_from_rulesets(
+        bytes,
+        ruleset_size as usize,
+        unique_count,
+        &counts,
+        dominant_dict_id,
+        transport_stride,
+    )?;
     Ok(RulesetSummary {
         tick,
         unique_count,
@@ -929,7 +1086,198 @@ fn parse_ruleset_summary(tick: u64, bytes: &[u8]) -> AnalysisResult<RulesetSumma
         dominant_count,
         dominant_fraction: fraction(u64::from(dominant_count), u64::from(cell_count)),
         shannon_diversity,
+        transporters,
     })
+}
+
+fn summarize_transporters_from_rulesets(
+    bytes: &[u8],
+    ruleset_size: usize,
+    unique_count: u32,
+    cell_counts: &HashMap<u32, u32>,
+    dominant_dict_id: Option<u32>,
+    transport_stride: usize,
+) -> AnalysisResult<TransporterSummary> {
+    let dict_off = RULESET_FULL_HEADER_SIZE as usize;
+    let mut active_slots = 0u64;
+    let mut uptake_dominant_slots = 0u64;
+    let mut secretion_dominant_slots = 0u64;
+    let mut bidirectional_slots = 0u64;
+    let mut gated_slots = 0u64;
+    let mut abs_gate_weight_sum = 0.0f64;
+    let mut uptake_rate_sum = 0.0f64;
+    let mut secretion_rate_sum = 0.0f64;
+    let mut pair_acc: HashMap<(u8, u8), TransportPairAccumulator> = HashMap::new();
+    let mut dominant_genotype = None;
+
+    for dict_id in 0..unique_count {
+        let count = u64::from(*cell_counts.get(&dict_id).unwrap_or(&0));
+        let off = dict_off + dict_id as usize * ruleset_size;
+        let payload = &bytes[off..off + ruleset_size];
+        let (genotype, transporters) = summarize_genotype_transport(payload, transport_stride)?;
+        if dominant_dict_id == Some(dict_id) {
+            dominant_genotype = Some(GenotypeTransportSummary {
+                dict_id,
+                active_slots: genotype.active_slots,
+                gated_slots: genotype.gated_slots,
+                uptake_dominant_slots: genotype.uptake_dominant_slots,
+                secretion_dominant_slots: genotype.secretion_dominant_slots,
+            });
+        }
+        if count == 0 {
+            continue;
+        }
+        for tp in transporters {
+            let uptake = tp.uptake_rate.max(0.0);
+            let secretion = tp.secrete_rate.max(0.0);
+            let is_active =
+                uptake > ACTIVE_TRANSPORT_THRESHOLD || secretion > ACTIVE_TRANSPORT_THRESHOLD;
+            if !is_active {
+                continue;
+            }
+            active_slots += count;
+            uptake_rate_sum += f64::from(uptake) * count as f64;
+            secretion_rate_sum += f64::from(secretion) * count as f64;
+            if uptake > ACTIVE_TRANSPORT_THRESHOLD && secretion > ACTIVE_TRANSPORT_THRESHOLD {
+                bidirectional_slots += count;
+            }
+            if uptake > secretion + ACTIVE_TRANSPORT_THRESHOLD {
+                uptake_dominant_slots += count;
+            } else if secretion > uptake + ACTIVE_TRANSPORT_THRESHOLD {
+                secretion_dominant_slots += count;
+            }
+            if tp.gate_weight.abs() > ACTIVE_TRANSPORT_THRESHOLD {
+                gated_slots += count;
+                abs_gate_weight_sum += f64::from(tp.gate_weight.abs()) * count as f64;
+            }
+            let pair = pair_acc
+                .entry((tp.ext_species, tp.int_species))
+                .or_default();
+            pair.active_slots += count;
+            pair.uptake_rate_sum += f64::from(uptake) * count as f64;
+            pair.secrete_rate_sum += f64::from(secretion) * count as f64;
+            if tp.gate_weight.abs() > ACTIVE_TRANSPORT_THRESHOLD {
+                pair.gated_slots += count;
+            }
+        }
+    }
+
+    let mut common_pairs: Vec<_> = pair_acc
+        .into_iter()
+        .map(|((ext_species, int_species), acc)| TransportPairSummary {
+            ext_species,
+            int_species,
+            active_slots: acc.active_slots,
+            avg_uptake_rate: if acc.active_slots > 0 {
+                acc.uptake_rate_sum / acc.active_slots as f64
+            } else {
+                0.0
+            },
+            avg_secrete_rate: if acc.active_slots > 0 {
+                acc.secrete_rate_sum / acc.active_slots as f64
+            } else {
+                0.0
+            },
+            gated_slots: acc.gated_slots,
+        })
+        .collect();
+    common_pairs.sort_by(|a, b| {
+        b.active_slots
+            .cmp(&a.active_slots)
+            .then_with(|| a.ext_species.cmp(&b.ext_species))
+            .then_with(|| a.int_species.cmp(&b.int_species))
+    });
+    common_pairs.truncate(MAX_COMMON_TRANSPORT_PAIRS);
+
+    let cell_count: u64 = cell_counts.values().map(|count| u64::from(*count)).sum();
+    Ok(TransporterSummary {
+        active_slots,
+        avg_active_per_cell: fraction(active_slots, cell_count),
+        uptake_dominant_slots,
+        secretion_dominant_slots,
+        bidirectional_slots,
+        gated_slots,
+        avg_abs_gate_weight: if gated_slots > 0 {
+            abs_gate_weight_sum / gated_slots as f64
+        } else {
+            0.0
+        },
+        uptake_rate_sum,
+        secretion_rate_sum,
+        common_pairs,
+        dominant_genotype,
+    })
+}
+
+fn summarize_genotype_transport(
+    payload: &[u8],
+    transport_stride: usize,
+) -> AnalysisResult<(
+    GenotypeTransportStats,
+    [ParsedTransporter; TRANSPORTER_COUNT],
+)> {
+    let transporters = parse_transporters(payload, transport_stride)?;
+    let mut stats = GenotypeTransportStats::default();
+    for tp in &transporters {
+        let uptake = tp.uptake_rate.max(0.0);
+        let secretion = tp.secrete_rate.max(0.0);
+        if uptake > ACTIVE_TRANSPORT_THRESHOLD || secretion > ACTIVE_TRANSPORT_THRESHOLD {
+            stats.active_slots += 1;
+            if tp.gate_weight.abs() > ACTIVE_TRANSPORT_THRESHOLD {
+                stats.gated_slots += 1;
+            }
+            if uptake > secretion + ACTIVE_TRANSPORT_THRESHOLD {
+                stats.uptake_dominant_slots += 1;
+            } else if secretion > uptake + ACTIVE_TRANSPORT_THRESHOLD {
+                stats.secretion_dominant_slots += 1;
+            }
+        }
+    }
+    Ok((stats, transporters))
+}
+
+fn parse_transporters(
+    payload: &[u8],
+    transport_stride: usize,
+) -> AnalysisResult<[ParsedTransporter; TRANSPORTER_COUNT]> {
+    let mut out = [ParsedTransporter {
+        uptake_rate: 0.0,
+        secrete_rate: 0.0,
+        ext_species: 0,
+        int_species: 0,
+        gate_weight: 0.0,
+    }; TRANSPORTER_COUNT];
+    let transport_off = RECEPTOR_PAYLOAD_BYTES;
+    for (i, slot) in out.iter_mut().enumerate() {
+        let off = transport_off + i * transport_stride;
+        let end = off + transport_stride;
+        if end > payload.len() {
+            return Err("ruleset transporter payload truncated".into());
+        }
+        let uptake_rate = f32::from_le_bytes(payload[off..off + 4].try_into().unwrap());
+        let secrete_rate = f32::from_le_bytes(payload[off + 4..off + 8].try_into().unwrap());
+        let gate_weight = if transport_stride >= TRANSPORT_V2_STRIDE {
+            f32::from_le_bytes(payload[off + 11..off + 15].try_into().unwrap())
+        } else {
+            0.0
+        };
+        *slot = ParsedTransporter {
+            uptake_rate: finite_rate_for_analysis(uptake_rate),
+            secrete_rate: finite_rate_for_analysis(secrete_rate),
+            ext_species: payload[off + 8],
+            int_species: payload[off + 9],
+            gate_weight: if gate_weight.is_finite() {
+                gate_weight
+            } else {
+                0.0
+            },
+        };
+    }
+    Ok(out)
+}
+
+fn finite_rate_for_analysis(value: f32) -> f32 {
+    if value.is_finite() { value } else { 0.0 }
 }
 
 fn classify_run_findings(analysis: &RunAnalysis) -> Vec<Finding> {
@@ -1132,6 +1480,14 @@ impl RunComparisonEntry {
                 .rulesets
                 .as_ref()
                 .map(|rulesets| rulesets.dominant_fraction),
+            transporter_active_per_cell: analysis
+                .rulesets
+                .as_ref()
+                .map(|rulesets| rulesets.transporters.avg_active_per_cell),
+            transporter_gated_slots: analysis
+                .rulesets
+                .as_ref()
+                .map(|rulesets| rulesets.transporters.gated_slots),
         }
     }
 }
@@ -1273,6 +1629,122 @@ mod tests {
         assert_eq!(summary.cell_count, 3);
         assert_eq!(summary.dominant_dict_id, Some(1));
         assert_eq!(summary.dominant_count, 2);
+        assert_eq!(summary.transporters.active_slots, 0);
+    }
+
+    fn set_transport(
+        payload: &mut [u8],
+        slot: usize,
+        uptake_rate: f32,
+        secrete_rate: f32,
+        ext_species: u8,
+        int_species: u8,
+        gate_receptor: u8,
+        gate_weight: f32,
+    ) {
+        let off = RECEPTOR_PAYLOAD_BYTES + slot * TRANSPORT_V2_STRIDE;
+        payload[off..off + 4].copy_from_slice(&uptake_rate.to_le_bytes());
+        payload[off + 4..off + 8].copy_from_slice(&secrete_rate.to_le_bytes());
+        payload[off + 8] = ext_species;
+        payload[off + 9] = int_species;
+        payload[off + 10] = gate_receptor;
+        payload[off + 11..off + 15].copy_from_slice(&gate_weight.to_le_bytes());
+    }
+
+    fn set_v1_transport(
+        payload: &mut [u8],
+        slot: usize,
+        uptake_rate: f32,
+        secrete_rate: f32,
+        ext_species: u8,
+        int_species: u8,
+    ) {
+        let off = RECEPTOR_PAYLOAD_BYTES + slot * TRANSPORT_V1_STRIDE;
+        payload[off..off + 4].copy_from_slice(&uptake_rate.to_le_bytes());
+        payload[off + 4..off + 8].copy_from_slice(&secrete_rate.to_le_bytes());
+        payload[off + 8] = ext_species;
+        payload[off + 9] = int_species;
+    }
+
+    #[test]
+    fn ruleset_summary_parses_v1_transporters_as_ungated() {
+        let mut dict = vec![0u8; RULESET_FULL_CANONICAL_SIZE_V1 as usize];
+        set_v1_transport(&mut dict, 0, 0.4, 0.1, 2, 3);
+
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&RULESET_FULL_MAGIC);
+        bytes.extend_from_slice(&RULESET_FULL_FORMAT_VERSION_V1.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&RULESET_FULL_CANONICAL_SIZE_V1.to_le_bytes());
+        bytes.extend_from_slice(&dict);
+        bytes.extend_from_slice(&4u16.to_le_bytes());
+        bytes.extend_from_slice(&5u16.to_le_bytes());
+        bytes.extend_from_slice(&6u16.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+
+        let summary = parse_ruleset_summary(9, &bytes).unwrap();
+
+        assert_eq!(summary.unique_count, 1);
+        assert_eq!(summary.cell_count, 1);
+        assert_eq!(summary.transporters.active_slots, 1);
+        assert_eq!(summary.transporters.gated_slots, 0);
+        assert_eq!(summary.transporters.avg_abs_gate_weight, 0.0);
+        assert_eq!(summary.transporters.uptake_dominant_slots, 1);
+        let common = &summary.transporters.common_pairs[0];
+        assert_eq!((common.ext_species, common.int_species), (2, 3));
+        assert_eq!(common.gated_slots, 0);
+        assert!((common.avg_uptake_rate - 0.4).abs() < 1e-6);
+        assert!((common.avg_secrete_rate - 0.1).abs() < 1e-6);
+    }
+
+    #[test]
+    fn ruleset_summary_reports_transporter_ecology() {
+        let mut dict0 = vec![0u8; RULESET_FULL_CANONICAL_SIZE as usize];
+        set_transport(&mut dict0, 0, 1.0, 0.0, 1, 2, 1, 0.5);
+        set_transport(&mut dict0, 1, 0.0, 2.0, 3, 4, 0, 0.0);
+        let mut dict1 = vec![0u8; RULESET_FULL_CANONICAL_SIZE as usize];
+        set_transport(&mut dict1, 0, 0.2, 0.3, 1, 2, 2, -0.25);
+
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&RULESET_FULL_MAGIC);
+        bytes.extend_from_slice(&RULESET_FULL_FORMAT_VERSION.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&2u32.to_le_bytes());
+        bytes.extend_from_slice(&3u32.to_le_bytes());
+        bytes.extend_from_slice(&RULESET_FULL_CANONICAL_SIZE.to_le_bytes());
+        bytes.extend_from_slice(&dict0);
+        bytes.extend_from_slice(&dict1);
+        for (z, dict_id) in [(0u16, 0u32), (1u16, 1u32), (2u16, 1u32)] {
+            bytes.extend_from_slice(&0u16.to_le_bytes());
+            bytes.extend_from_slice(&0u16.to_le_bytes());
+            bytes.extend_from_slice(&z.to_le_bytes());
+            bytes.extend_from_slice(&dict_id.to_le_bytes());
+        }
+
+        let summary = parse_ruleset_summary(5, &bytes).unwrap();
+        let transporters = &summary.transporters;
+
+        assert_eq!(transporters.active_slots, 4);
+        assert!((transporters.avg_active_per_cell - 4.0 / 3.0).abs() < 1e-9);
+        assert_eq!(transporters.uptake_dominant_slots, 1);
+        assert_eq!(transporters.secretion_dominant_slots, 3);
+        assert_eq!(transporters.bidirectional_slots, 2);
+        assert_eq!(transporters.gated_slots, 3);
+        assert!((transporters.avg_abs_gate_weight - 1.0 / 3.0).abs() < 1e-6);
+        let dominant = transporters.dominant_genotype.as_ref().unwrap();
+        assert_eq!(dominant.dict_id, 1);
+        assert_eq!(dominant.active_slots, 1);
+        assert_eq!(dominant.gated_slots, 1);
+        assert_eq!(dominant.secretion_dominant_slots, 1);
+
+        let common = &transporters.common_pairs[0];
+        assert_eq!((common.ext_species, common.int_species), (1, 2));
+        assert_eq!(common.active_slots, 3);
+        assert!((common.avg_uptake_rate - (1.4 / 3.0)).abs() < 1e-6);
+        assert!((common.avg_secrete_rate - 0.2).abs() < 1e-6);
+        assert_eq!(common.gated_slots, 3);
     }
 
     #[test]

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 import json
 import math
 import struct
@@ -12,16 +13,51 @@ from pathlib import Path
 
 
 POSITION_INTEGER_TOLERANCE = 0.001
-CANONICAL_RULESET_SIZE = 536
-RULESET_FLOAT_SECTIONS = (
-    (0, 8, 12, (0, 4, 8), "receptor"),
-    (96, 8, 10, (0, 4), "transport"),
-    (176, 16, 16, (4, 8, 12), "reaction"),
-    (432, 8, 10, (0, 4), "effector"),
-    (512, 1, 16, (0, 4, 8, 12), "fate"),
-    (528, 1, 4, (0,), "hgt_propensity"),
-    (532, 1, 4, (0,), "mutation_rate"),
+CURRENT_RULESET_SIZE = 576
+CURRENT_FORMAT_VERSION = 2
+LEGACY_RULESET_SIZE_V1 = 536
+LEGACY_FORMAT_VERSION_V1 = 1
+
+
+@dataclass(frozen=True)
+class RulesetLayout:
+    version: int
+    ruleset_size: int
+    float_sections: tuple[tuple[int, int, int, tuple[int, ...], str], ...]
+
+
+LAYOUT_V1 = RulesetLayout(
+    version=LEGACY_FORMAT_VERSION_V1,
+    ruleset_size=LEGACY_RULESET_SIZE_V1,
+    float_sections=(
+        (0, 8, 12, (0, 4, 8), "receptor"),
+        (96, 8, 10, (0, 4), "transport"),
+        (176, 16, 16, (4, 8, 12), "reaction"),
+        (432, 8, 10, (0, 4), "effector"),
+        (512, 1, 16, (0, 4, 8, 12), "fate"),
+        (528, 1, 4, (0,), "hgt_propensity"),
+        (532, 1, 4, (0,), "mutation_rate"),
+    ),
 )
+
+LAYOUT_V2 = RulesetLayout(
+    version=CURRENT_FORMAT_VERSION,
+    ruleset_size=CURRENT_RULESET_SIZE,
+    float_sections=(
+        (0, 8, 12, (0, 4, 8), "receptor"),
+        (96, 8, 15, (0, 4, 11), "transport"),
+        (216, 16, 16, (4, 8, 12), "reaction"),
+        (472, 8, 10, (0, 4), "effector"),
+        (552, 1, 16, (0, 4, 8, 12), "fate"),
+        (568, 1, 4, (0,), "hgt_propensity"),
+        (572, 1, 4, (0,), "mutation_rate"),
+    ),
+)
+
+SUPPORTED_RULESET_LAYOUTS = {
+    (LAYOUT_V1.version, LAYOUT_V1.ruleset_size): LAYOUT_V1,
+    (LAYOUT_V2.version, LAYOUT_V2.ruleset_size): LAYOUT_V2,
+}
 
 
 def resolve_pattern(meta: dict, key: str, tick: int, default: str) -> Path:
@@ -147,14 +183,11 @@ def validate_ruleset_layer_payload(payload: bytes, stride: int, meta: dict) -> N
 
 
 def validate_ruleset_dictionary_floats(
-    payload: bytes, dict_off: int, dict_count: int, ruleset_byte_size: int
+    payload: bytes, dict_off: int, dict_count: int, layout: RulesetLayout
 ) -> None:
-    if ruleset_byte_size != CANONICAL_RULESET_SIZE:
-        return
-
     for dict_id in range(dict_count):
-        base = dict_off + dict_id * ruleset_byte_size
-        for section_off, count, stride, float_offsets, section_name in RULESET_FLOAT_SECTIONS:
+        base = dict_off + dict_id * layout.ruleset_size
+        for section_off, count, stride, float_offsets, section_name in layout.float_sections:
             for entry_index in range(count):
                 entry_base = base + section_off + entry_index * stride
                 for rel_off in float_offsets:
@@ -197,7 +230,7 @@ def check_full_ruleset(run_dir: Path, meta: dict, tick: int) -> None:
             f"full ruleset magic mismatch: got {magic!r}, expected {expected_magic!r}"
         )
 
-    expected_version = int(meta.get("ruleset_full_format_version", 1))
+    expected_version = int(meta.get("ruleset_full_format_version", version))
     if version != expected_version:
         raise SystemExit(
             f"full ruleset version mismatch: got {version}, expected {expected_version}"
@@ -205,10 +238,16 @@ def check_full_ruleset(run_dir: Path, meta: dict, tick: int) -> None:
     if flags != 0:
         raise SystemExit(f"full ruleset flags mismatch: got {flags}, expected 0")
 
-    expected_ruleset_size = int(meta.get("ruleset_full_ruleset_byte_size", 536))
+    expected_ruleset_size = int(meta.get("ruleset_full_ruleset_byte_size", ruleset_byte_size))
     if ruleset_byte_size != expected_ruleset_size:
         raise SystemExit(
             f"full ruleset byte size mismatch: got {ruleset_byte_size}, expected {expected_ruleset_size}"
+        )
+    layout = SUPPORTED_RULESET_LAYOUTS.get((version, ruleset_byte_size))
+    if layout is None:
+        raise SystemExit(
+            f"unsupported full ruleset layout: version {version}, size {ruleset_byte_size}; "
+            f"supported layouts are v1/{LEGACY_RULESET_SIZE_V1}B and v2/{CURRENT_RULESET_SIZE}B"
         )
 
     expected_cell_ref_stride = int(meta.get("ruleset_full_cell_ref_stride", 10))
@@ -225,7 +264,7 @@ def check_full_ruleset(run_dir: Path, meta: dict, tick: int) -> None:
         )
 
     dict_off = header_size
-    validate_ruleset_dictionary_floats(payload, dict_off, dict_count, ruleset_byte_size)
+    validate_ruleset_dictionary_floats(payload, dict_off, dict_count, layout)
 
     # Validate dict IDs in cell refs are in range
     cell_refs_off = header_size + dict_count * ruleset_byte_size

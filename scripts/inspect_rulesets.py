@@ -14,6 +14,7 @@ If the file is compressed, requires the `zstd` CLI on PATH.
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 import struct
 import subprocess
 import sys
@@ -27,39 +28,83 @@ from pathlib import Path
 MAGIC = b"MRSF"
 HEADER_SIZE = 24
 CELL_REF_STRIDE = 10
-CANONICAL_RULESET_SIZE = 536
-FORMAT_VERSION = 1
+CURRENT_RULESET_SIZE = 576
+CURRENT_FORMAT_VERSION = 2
+LEGACY_RULESET_SIZE_V1 = 536
+LEGACY_FORMAT_VERSION_V1 = 1
 
-# Ruleset payload layout (byte offsets and sizes of each section)
-RECEPTORS_OFF = 0
-RECEPTORS_COUNT = 8
-RECEPTOR_SIZE = 12  # k_half:f32, n_hill:f32, gain:f32
 
-TRANSPORT_OFF = RECEPTORS_OFF + RECEPTORS_COUNT * RECEPTOR_SIZE  # 96
-TRANSPORT_COUNT = 8
-TRANSPORT_SIZE = 10  # uptake_rate:f32, secrete_rate:f32, ext_species:u8, int_species:u8
+@dataclass(frozen=True)
+class RulesetLayout:
+    version: int
+    ruleset_size: int
+    receptor_off: int
+    receptor_count: int
+    receptor_size: int
+    transport_off: int
+    transport_count: int
+    transport_size: int
+    transport_has_gate: bool
+    reaction_off: int
+    reaction_count: int
+    reaction_size: int
+    effector_off: int
+    effector_count: int
+    effector_size: int
+    fate_off: int
+    fate_size: int
+    hgt_off: int
+    mut_off: int
 
-REACTIONS_OFF = TRANSPORT_OFF + TRANSPORT_COUNT * TRANSPORT_SIZE  # 176
-REACTIONS_COUNT = 16
-REACTION_SIZE = 16  # substrate:u8, product:u8, catalyst:u8, cofactor:u8, k_m:f32, v_max:f32, k_cat:f32
 
-EFFECTORS_OFF = REACTIONS_OFF + REACTIONS_COUNT * REACTION_SIZE  # 432
-EFFECTORS_COUNT = 8
-EFFECTOR_SIZE = 10  # threshold:f32, rate:f32, int_species:u8, ext_species:u8
-
-FATE_OFF = EFFECTORS_OFF + EFFECTORS_COUNT * EFFECTOR_SIZE  # 512
-FATE_SIZE = 16  # division_energy:f32, death_energy:f32, quiescence_energy:f32, division_prep_ticks:f32
-
-HGT_OFF = FATE_OFF + FATE_SIZE  # 528
-HGT_SIZE = 4  # hgt_propensity:f32
-
-MUT_OFF = HGT_OFF + HGT_SIZE  # 532
-MUT_SIZE = 4  # mutation_rate:f32
-
-assert MUT_OFF + MUT_SIZE == CANONICAL_RULESET_SIZE, (
-    f"Payload layout mismatch: expected {CANONICAL_RULESET_SIZE}, "
-    f"computed {MUT_OFF + MUT_SIZE}"
+LAYOUT_V1 = RulesetLayout(
+    version=LEGACY_FORMAT_VERSION_V1,
+    ruleset_size=LEGACY_RULESET_SIZE_V1,
+    receptor_off=0,
+    receptor_count=8,
+    receptor_size=12,
+    transport_off=96,
+    transport_count=8,
+    transport_size=10,
+    transport_has_gate=False,
+    reaction_off=176,
+    reaction_count=16,
+    reaction_size=16,
+    effector_off=432,
+    effector_count=8,
+    effector_size=10,
+    fate_off=512,
+    fate_size=16,
+    hgt_off=528,
+    mut_off=532,
 )
+
+LAYOUT_V2 = RulesetLayout(
+    version=CURRENT_FORMAT_VERSION,
+    ruleset_size=CURRENT_RULESET_SIZE,
+    receptor_off=0,
+    receptor_count=8,
+    receptor_size=12,
+    transport_off=96,
+    transport_count=8,
+    transport_size=15,
+    transport_has_gate=True,
+    reaction_off=216,
+    reaction_count=16,
+    reaction_size=16,
+    effector_off=472,
+    effector_count=8,
+    effector_size=10,
+    fate_off=552,
+    fate_size=16,
+    hgt_off=568,
+    mut_off=572,
+)
+
+SUPPORTED_LAYOUTS = {
+    (LAYOUT_V1.version, LAYOUT_V1.ruleset_size): LAYOUT_V1,
+    (LAYOUT_V2.version, LAYOUT_V2.ruleset_size): LAYOUT_V2,
+}
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -80,8 +125,8 @@ def read_maybe_compressed(path: Path) -> bytes:
 
 def validate_header(
     payload: bytes, allow_unsupported_version: bool
-) -> tuple[int, int, int]:
-    """Parse and validate header. Returns (flags, dict_count, cell_count)."""
+) -> tuple[int, int, int, RulesetLayout]:
+    """Parse and validate header. Returns (flags, dict_count, cell_count, layout)."""
     if len(payload) < HEADER_SIZE:
         sys.exit(
             f"Error: file too small for header ({len(payload)} < {HEADER_SIZE} bytes)"
@@ -98,19 +143,17 @@ def validate_header(
     if magic != MAGIC:
         sys.exit(f"Error: magic mismatch: got {magic!r}, expected {MAGIC!r}")
 
-    # Validate version
-    if version != FORMAT_VERSION:
-        message = f"version mismatch: got {version}, expected {FORMAT_VERSION}"
+    layout = SUPPORTED_LAYOUTS.get((version, ruleset_byte_size))
+    if layout is None:
+        message = (
+            f"unsupported ruleset layout: version {version}, "
+            f"ruleset_byte_size {ruleset_byte_size}; supported layouts are "
+            f"v1/{LEGACY_RULESET_SIZE_V1}B and v2/{CURRENT_RULESET_SIZE}B"
+        )
         if not allow_unsupported_version:
             sys.exit(f"Error: {message}")
         print(f"WARNING: {message}")
-
-    # Validate ruleset byte size
-    if ruleset_byte_size != CANONICAL_RULESET_SIZE:
-        sys.exit(
-            f"Error: ruleset_byte_size mismatch: got {ruleset_byte_size}, "
-            f"expected {CANONICAL_RULESET_SIZE}"
-        )
+        layout = LAYOUT_V2
 
     # Validate total file size
     cell_refs_off = HEADER_SIZE + dict_count * ruleset_byte_size
@@ -123,12 +166,12 @@ def validate_header(
             f"+ refs={cell_count}×{CELL_REF_STRIDE})"
         )
 
-    return flags, dict_count, cell_count
+    return flags, dict_count, cell_count, layout
 
 
-def decode_receptor(payload: bytes, base: int, i: int) -> dict:
+def decode_receptor(payload: bytes, base: int, i: int, layout: RulesetLayout) -> dict:
     """Decode one receptor record from a dictionary entry."""
-    off = base + RECEPTORS_OFF + i * RECEPTOR_SIZE
+    off = base + layout.receptor_off + i * layout.receptor_size
     return {
         "k_half": struct.unpack_from("<f", payload, off)[0],
         "n_hill": struct.unpack_from("<f", payload, off + 4)[0],
@@ -136,20 +179,24 @@ def decode_receptor(payload: bytes, base: int, i: int) -> dict:
     }
 
 
-def decode_transport(payload: bytes, base: int, i: int) -> dict:
+def decode_transport(payload: bytes, base: int, i: int, layout: RulesetLayout) -> dict:
     """Decode one transport record from a dictionary entry."""
-    off = base + TRANSPORT_OFF + i * TRANSPORT_SIZE
-    return {
+    off = base + layout.transport_off + i * layout.transport_size
+    decoded = {
         "uptake_rate": struct.unpack_from("<f", payload, off)[0],
         "secrete_rate": struct.unpack_from("<f", payload, off + 4)[0],
         "ext_species": payload[off + 8],
         "int_species": payload[off + 9],
     }
+    if layout.transport_has_gate:
+        decoded["gate_receptor"] = payload[off + 10]
+        decoded["gate_weight"] = struct.unpack_from("<f", payload, off + 11)[0]
+    return decoded
 
 
-def decode_reaction(payload: bytes, base: int, i: int) -> dict:
+def decode_reaction(payload: bytes, base: int, i: int, layout: RulesetLayout) -> dict:
     """Decode one reaction record from a dictionary entry."""
-    off = base + REACTIONS_OFF + i * REACTION_SIZE
+    off = base + layout.reaction_off + i * layout.reaction_size
     return {
         "substrate": payload[off],
         "product": payload[off + 1],
@@ -161,9 +208,9 @@ def decode_reaction(payload: bytes, base: int, i: int) -> dict:
     }
 
 
-def decode_effector(payload: bytes, base: int, i: int) -> dict:
+def decode_effector(payload: bytes, base: int, i: int, layout: RulesetLayout) -> dict:
     """Decode one effector record from a dictionary entry."""
-    off = base + EFFECTORS_OFF + i * EFFECTOR_SIZE
+    off = base + layout.effector_off + i * layout.effector_size
     return {
         "threshold": struct.unpack_from("<f", payload, off)[0],
         "rate": struct.unpack_from("<f", payload, off + 4)[0],
@@ -172,9 +219,9 @@ def decode_effector(payload: bytes, base: int, i: int) -> dict:
     }
 
 
-def decode_fate(payload: bytes, base: int) -> dict:
+def decode_fate(payload: bytes, base: int, layout: RulesetLayout) -> dict:
     """Decode fate parameters from a dictionary entry."""
-    off = base + FATE_OFF
+    off = base + layout.fate_off
     return {
         "division_energy": struct.unpack_from("<f", payload, off)[0],
         "death_energy": struct.unpack_from("<f", payload, off + 4)[0],
@@ -184,23 +231,23 @@ def decode_fate(payload: bytes, base: int) -> dict:
 
 
 def decode_ruleset_glimpse(
-    payload: bytes, dict_start: int, entry_name: str = "entry 0"
+    payload: bytes, dict_start: int, layout: RulesetLayout, entry_name: str = "entry 0"
 ) -> dict:
     """Decode a readable glimpse of one ruleset dictionary entry."""
     r = {}
     # First receptor
-    r["receptor[0]"] = decode_receptor(payload, dict_start, 0)
+    r["receptor[0]"] = decode_receptor(payload, dict_start, 0, layout)
     # First transport
-    r["transport[0]"] = decode_transport(payload, dict_start, 0)
+    r["transport[0]"] = decode_transport(payload, dict_start, 0, layout)
     # First reaction
-    r["reaction[0]"] = decode_reaction(payload, dict_start, 0)
+    r["reaction[0]"] = decode_reaction(payload, dict_start, 0, layout)
     # First effector
-    r["effector[0]"] = decode_effector(payload, dict_start, 0)
+    r["effector[0]"] = decode_effector(payload, dict_start, 0, layout)
     # Fate
-    r["fate"] = decode_fate(payload, dict_start)
+    r["fate"] = decode_fate(payload, dict_start, layout)
     # hgt, mutation
-    r["hgt_propensity"] = struct.unpack_from("<f", payload, dict_start + HGT_OFF)[0]
-    r["mutation_rate"] = struct.unpack_from("<f", payload, dict_start + MUT_OFF)[0]
+    r["hgt_propensity"] = struct.unpack_from("<f", payload, dict_start + layout.hgt_off)[0]
+    r["mutation_rate"] = struct.unpack_from("<f", payload, dict_start + layout.mut_off)[0]
     return r
 
 
@@ -254,9 +301,11 @@ def print_cell_ref_sampling(
         print(f"    [{i:>5}] pos=({x:>3},{y:>3},{z:>2})  dict_id={dict_id}")
 
 
-def print_ruleset_glimpse(payload: bytes, dict_start: int, ruleset_size: int) -> None:
+def print_ruleset_glimpse(
+    payload: bytes, dict_start: int, ruleset_size: int, layout: RulesetLayout
+) -> None:
     """Print a decoded glimpse of the first dictionary entry."""
-    glimpse = decode_ruleset_glimpse(payload, dict_start)
+    glimpse = decode_ruleset_glimpse(payload, dict_start, layout)
 
     print(f"\n  Decoded glimpse (dict entry 0, {ruleset_size} B):")
     for key, val in glimpse.items():
@@ -331,7 +380,7 @@ Examples:
     print(f"  Raw size: {len(payload):,} bytes")
 
     # --- Header ---
-    flags, dict_count, cell_count = validate_header(
+    flags, dict_count, cell_count, layout = validate_header(
         payload, args.allow_unsupported_version
     )
     ruleset_size = struct.unpack_from("<I", payload, 20)[0]
@@ -344,6 +393,7 @@ Examples:
     print(f"  Dict entries: {dict_count:,}")
     print(f"  Cells:        {cell_count:,}")
     print(f"  Ruleset byte size: {ruleset_size}")
+    print(f"  Decoded layout: v{layout.version}")
     if cell_count > 0 and dict_count > 0:
         compress_ratio = dict_count / cell_count * 100
         print(
@@ -383,7 +433,7 @@ Examples:
     if dict_count > 0 and not args.no_glimpse:
         print()
         print("  ── Ruleset Glimpse ──")
-        print_ruleset_glimpse(payload, HEADER_SIZE, ruleset_size)
+        print_ruleset_glimpse(payload, HEADER_SIZE, ruleset_size, layout)
 
     print()
     print("  ✓ Structure valid")

@@ -52,7 +52,7 @@ pub const CELL_FILE_PATTERN_RAW: &str = "tick_<T>.cells.bin";
 pub const RULESET_LAYER_FILE_PATTERN_RAW: &str = "tick_<T>.ruleset_layers.bin";
 
 /// Binary layout string for per-layer ruleset averages.
-pub const RULESET_LAYER_RECORD_LAYOUT: &str = "z:u16,reserved:u16,cell_count:u32,receptors:{k_half:f32,n_hill:f32,gain:f32}[s_receptors],transport:{uptake_rate:f32,secrete_rate:f32}[s_transporters],reactions:{k_m:f32,v_max:f32,k_cat:f32}[r_max],effectors:{threshold:f32,rate:f32}[s_effectors],fate:f32[4],hgt_propensity:f32,mutation_rate:f32";
+pub const RULESET_LAYER_RECORD_LAYOUT: &str = "z:u16,reserved:u16,cell_count:u32,receptors:{k_half:f32,n_hill:f32,gain:f32}[s_receptors],transport:{uptake_rate:f32,secrete_rate:f32,gate_weight:f32}[s_transporters],reactions:{k_m:f32,v_max:f32,k_cat:f32}[r_max],effectors:{threshold:f32,rate:f32}[s_effectors],fate:f32[4],hgt_propensity:f32,mutation_rate:f32";
 
 /// Full per-cell deduplicated ruleset dump filename pattern.
 pub const RULESET_FULL_FILE_PATTERN_RAW: &str = "tick_<T>.rulesets.bin";
@@ -61,7 +61,7 @@ pub const RULESET_FULL_FILE_PATTERN_RAW: &str = "tick_<T>.rulesets.bin";
 pub const RULESET_FULL_MAGIC: [u8; 4] = [b'M', b'R', b'S', b'F'];
 
 /// Version of the full ruleset dump binary format.
-pub const RULESET_FULL_FORMAT_VERSION: u32 = 1;
+pub const RULESET_FULL_FORMAT_VERSION: u32 = 2;
 
 /// Byte size of the full ruleset file header (magic + version + flags + dict_count + cell_count + ruleset_byte_size).
 pub const RULESET_FULL_HEADER_SIZE: u32 = 24;
@@ -74,19 +74,19 @@ pub const RULESET_FULL_CELL_REF_STRIDE: u32 = 10;
 ///
 /// Layout (all little-endian; u8 fields are 1 byte, f32 fields are 4 bytes):
 ///   receptors: 8 × {k_half:f32, n_hill:f32, gain:f32}           = 96 B
-///   transport: 8 × {uptake_rate:f32, secrete_rate:f32, ext_species:u8, int_species:u8} = 80 B
+///   transport: 8 × {uptake_rate:f32, secrete_rate:f32, ext_species:u8, int_species:u8, gate_receptor:u8, gate_weight:f32} = 120 B
 ///   reactions: 16 × {substrate:u8, product:u8, catalyst:u8, cofactor:u8, k_m:f32, v_max:f32, k_cat:f32} = 256 B
 ///   effectors: 8 × {threshold:f32, rate:f32, int_species:u8, ext_species:u8} = 80 B
 ///   fate: {division_energy:f32, death_energy:f32, quiescence_energy:f32, division_prep_ticks:f32} = 16 B
 ///   hgt_propensity: f32 = 4 B
 ///   mutation_rate: f32 = 4 B
-///   total = 536
-pub const RULESET_FULL_CANONICAL_SIZE: u32 = 536;
+///   total = 576
+pub const RULESET_FULL_CANONICAL_SIZE: u32 = 576;
 
 /// Binary layout string for one canonical ruleset payload.
 pub const RULESET_FULL_PAYLOAD_LAYOUT: &str = "\
 receptors:{k_half:f32,n_hill:f32,gain:f32}[s_receptors],\
-transport:{uptake_rate:f32,secrete_rate:f32,ext_species:u8,int_species:u8}[s_transporters],\
+transport:{uptake_rate:f32,secrete_rate:f32,ext_species:u8,int_species:u8,gate_receptor:u8,gate_weight:f32}[s_transporters],\
 reactions:{substrate:u8,product:u8,catalyst:u8,cofactor:u8,k_m:f32,v_max:f32,k_cat:f32}[r_max],\
 effectors:{threshold:f32,rate:f32,int_species:u8,ext_species:u8}[s_effectors],\
 fate:{division_energy:f32,death_energy:f32,quiescence_energy:f32,division_prep_ticks:f32},\
@@ -360,7 +360,7 @@ pub fn ruleset_layer_value_count(
 ) -> Option<u32> {
     s_receptors
         .checked_mul(3)?
-        .checked_add(s_transporters.checked_mul(2)?)?
+        .checked_add(s_transporters.checked_mul(3)?)?
         .checked_add(r_max.checked_mul(3)?)?
         .checked_add(s_effectors.checked_mul(2)?)?
         .checked_add(6)
@@ -622,8 +622,8 @@ mod tests {
 
     #[test]
     fn test_ruleset_layer_stride_helpers() {
-        assert_eq!(ruleset_layer_value_count(8, 8, 16, 8), Some(110));
-        assert_eq!(ruleset_layer_record_stride(8, 8, 16, 8), Some(448));
+        assert_eq!(ruleset_layer_value_count(8, 8, 16, 8), Some(118));
+        assert_eq!(ruleset_layer_record_stride(8, 8, 16, 8), Some(480));
     }
 
     #[test]

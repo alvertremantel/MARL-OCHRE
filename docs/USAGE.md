@@ -268,8 +268,8 @@ Runs write into `output_dir` (default: `output/run_128x128x64`).
 | `stoich_ticks.csv` | `write_stoich_tick_log = true` | Per-tick stoichiometry audit totals with gross imbalance columns plus net signed deltas |
 | `stoich_v2_summary.json` | `write_stoich_v2_summary = true` or stoich enforcement enabled | Versioned full-system ledger with stage and reservoir totals |
 | `stoich_v2_events.csv` | `write_stoich_v2_events = true` | Per-event full-system stoichiometry rows |
-| `tick_<T>.ruleset_layers.bin.zst` | `ruleset_output_mode = "layer_averages"` or `"both"` | Per-z-layer slot-wise averages of continuous ruleset parameters; topology/species IDs are omitted, so slots can mix semantics |
-| `tick_<T>.rulesets.bin.zst` | `ruleset_output_mode = "full"` or `"both"` | Deduplicated per-cell ruleset genotype dump with dictionary and positions; omits lineage, energy, and internal pools unless combined with cell records |
+| `tick_<T>.ruleset_layers.bin.zst` | `ruleset_output_mode = "layer_averages"` or `"both"` | Per-z-layer slot-wise averages of continuous ruleset parameters, including transporter gate weights; topology/species IDs are omitted, so slots can mix semantics |
+| `tick_<T>.rulesets.bin.zst` | `ruleset_output_mode = "full"` or `"both"` | Deduplicated per-cell ruleset genotype dump with dictionary and positions; current v2 transporter entries include gate receptor/weight; omits lineage, energy, and internal pools unless combined with cell records |
 | `chem_<tick>.csv` | `write_csv_snapshots = true` | Full field dump as CSV |
 | `cells_<tick>.csv` | `write_csv_snapshots = true` | All cell states as CSV |
 | `reactions_<tick>.csv` | `write_csv_snapshots = true` | All active reactions as CSV |
@@ -309,6 +309,19 @@ By default, analysis reads the full `ticks.csv` trajectory and samples the
 first, middle, and latest binary snapshots. Use `--all-snapshots`,
 `--latest-only`, or `--ticks 0,500,5000` to change that policy. Use
 `--no-rulesets` when full ruleset sidecars are unavailable or not needed.
+
+When full ruleset sidecars are available, `marl-analyze` also reports
+transporter ecology:
+
+- population-weighted active transporter slots and active slots per cell
+- uptake-dominant, secretion-dominant, and bidirectional active slots
+- receptor-gated active slots and average absolute `gate_weight`
+- common `(ext_species, int_species)` transporter pairs with average uptake and secretion rates
+- dominant genotype transporter counts for genotype-level story hooks
+
+Current full ruleset dumps are v2/576-byte payloads. `marl-analyze`,
+`check_binary_dump.py`, and `inspect_rulesets.py` also support legacy
+v1/536-byte payloads and report those transporters as ungated.
 
 ### Stoichiometry audit outputs
 

@@ -46,6 +46,9 @@ use marl_config::*;
 
 const LIGHT_SPECIES: usize = M_INT - 1;
 const CHEMICAL_INT_SPECIES: usize = M_INT - 1;
+const TRANSPORT_GATE_ACTIVATION_LIMIT: f32 = 1.0;
+const TRANSPORT_GATE_WEIGHT_LIMIT: f32 = 3.0;
+const TRANSPORT_GATE_FACTOR_MAX: f32 = 4.0;
 
 /// Receptor parameters: Hill-function sensor for an external chemical.
 ///
@@ -67,13 +70,18 @@ pub struct ReceptorParams {
 ///
 /// Each transporter is specific to one (ext_species, int_species) pair.
 /// Uptake and secretion rates are independent — a transporter can do both,
-/// creating a net flux direction based on concentration gradients.
+/// creating a net flux direction based on concentration gradients. The
+/// optional receptor gate multiplies both rates by
+/// `clamp(1 + gate_weight * activation[gate_receptor], 0, max)`.
+/// A zero gate weight preserves unconditional transport.
 #[derive(Clone, Debug)]
 pub struct TransportParams {
     pub uptake_rate: f32,
     pub secrete_rate: f32,
     pub ext_species: u8,
     pub int_species: u8,
+    pub gate_receptor: u8,
+    pub gate_weight: f32,
 }
 
 /// A single catalytic reaction in the cell's metabolic network.
@@ -190,6 +198,35 @@ pub struct CellState {
     pub prep_remaining: u16,
 }
 
+fn finite_nonnegative(value: f32) -> f32 {
+    if value.is_finite() {
+        value.max(0.0)
+    } else {
+        0.0
+    }
+}
+
+fn transport_gate_factor(tp: &TransportParams, activation: &[f32; S_RECEPTORS]) -> f32 {
+    if !tp.gate_weight.is_finite() {
+        return 1.0;
+    }
+    let weight = tp
+        .gate_weight
+        .clamp(-TRANSPORT_GATE_WEIGHT_LIMIT, TRANSPORT_GATE_WEIGHT_LIMIT);
+    if weight.abs() <= f32::EPSILON {
+        return 1.0;
+    }
+    let Some(signal) = activation.get(tp.gate_receptor as usize).copied() else {
+        return 1.0;
+    };
+    let factor = 1.0 + weight * signal;
+    if factor.is_finite() {
+        factor.clamp(0.0, TRANSPORT_GATE_FACTOR_MAX)
+    } else {
+        1.0
+    }
+}
+
 impl CellState {
     /// Run one complete cell update tick. Returns field deltas and an event.
     /// This is the 5-phase update:
@@ -221,13 +258,21 @@ impl CellState {
         let dt = sim.dt;
 
         // === PHASE 1: RECEPTOR PASS ===
-        // Activations modulate transport rates (not yet wired — future extension).
-        // Computed here for correctness; will matter when receptor-gated transport is added.
-        let mut _activation = [0.0f32; S_RECEPTORS];
+        // Activations modulate transport rates through each transporter's
+        // evolvable receptor gate.
+        let mut activation = [0.0f32; S_RECEPTORS];
         for i in 0..S_RECEPTORS {
             let r = &self.ruleset.receptors[i];
-            if i < S_EXT && r.gain.abs() > sim.active_reaction_threshold {
+            if i < S_EXT
+                && r.k_half.is_finite()
+                && r.n_hill.is_finite()
+                && r.gain.is_finite()
+                && r.gain.abs() > sim.active_reaction_threshold
+            {
                 let c = ext_conc[i];
+                if !c.is_finite() {
+                    continue;
+                }
                 // Guard against negative/zero base in powf
                 let k = r.k_half.max(1e-6);
                 let n = r
@@ -235,7 +280,13 @@ impl CellState {
                     .clamp(sim.hill_exponent_clamp_low, sim.hill_exponent_clamp_high);
                 let kn = k.powf(n);
                 let cn = c.max(0.0).powf(n);
-                _activation[i] = r.gain * cn / (kn + cn + 1e-9);
+                let value = r.gain * cn / (kn + cn + 1e-9);
+                if value.is_finite() {
+                    activation[i] = value.clamp(
+                        -TRANSPORT_GATE_ACTIVATION_LIMIT,
+                        TRANSPORT_GATE_ACTIVATION_LIMIT,
+                    );
+                }
             }
         }
 
@@ -256,10 +307,11 @@ impl CellState {
                 continue;
             }
 
-            let ext_available = ext_conc[ext_idx].max(0.0);
-            let internal_available = self.internal[int_idx].max(0.0);
-            let uptake_rate = tp.uptake_rate.max(0.0);
-            let secretion_rate = tp.secrete_rate.max(0.0);
+            let ext_available = finite_nonnegative(ext_conc[ext_idx]);
+            let internal_available = finite_nonnegative(self.internal[int_idx]);
+            let gate_factor = transport_gate_factor(tp, &activation);
+            let uptake_rate = finite_nonnegative(tp.uptake_rate) * gate_factor;
+            let secretion_rate = finite_nonnegative(tp.secrete_rate) * gate_factor;
             let secretion = secretion_rate * internal_available / (1.0 + internal_available);
             let uptake = uptake_rate * ext_available / (1.0 + ext_available);
             let uptake_request_amount = uptake * dt;
@@ -692,6 +744,16 @@ impl Ruleset {
                 t.ext_species = 0;
                 t.int_species = 0;
             }
+            if t.gate_receptor as usize >= S_RECEPTORS {
+                t.gate_receptor = 0;
+            }
+            if t.gate_weight.is_finite() {
+                t.gate_weight = t
+                    .gate_weight
+                    .clamp(-TRANSPORT_GATE_WEIGHT_LIMIT, TRANSPORT_GATE_WEIGHT_LIMIT);
+            } else {
+                t.gate_weight = 0.0;
+            }
         }
         for r in &mut self.reactions {
             if r.substrate as usize >= CHEMICAL_INT_SPECIES
@@ -738,6 +800,23 @@ impl Ruleset {
             }
         }
 
+        fn maybe_mutate_signed(
+            val: &mut f32,
+            rate: f32,
+            normal: &Normal<f32>,
+            rng: &mut impl Rng,
+            limit: f32,
+        ) {
+            if rng.random::<f32>() < rate {
+                *val += normal.sample(rng);
+            }
+            if val.is_finite() {
+                *val = val.clamp(-limit, limit);
+            } else {
+                *val = 0.0;
+            }
+        }
+
         // Mutate receptor sensitivities
         for r in &mut self.receptors {
             maybe_mutate(&mut r.k_half, rate, &normal, rng);
@@ -752,11 +831,21 @@ impl Ruleset {
         for t in &mut self.transport {
             maybe_mutate(&mut t.uptake_rate, rate, &normal, rng);
             maybe_mutate(&mut t.secrete_rate, rate, &normal, rng);
+            maybe_mutate_signed(
+                &mut t.gate_weight,
+                rate,
+                &normal,
+                rng,
+                TRANSPORT_GATE_WEIGHT_LIMIT,
+            );
             if rng.random::<f32>() < rate * sim.structural_mutation_rate_mult {
                 t.ext_species = rng.random_range(0..S_EXT as u8);
             }
             if rng.random::<f32>() < rate * sim.structural_mutation_rate_mult {
                 t.int_species = rng.random_range(0..CHEMICAL_INT_SPECIES as u8);
+            }
+            if rng.random::<f32>() < rate * sim.structural_mutation_rate_mult {
+                t.gate_receptor = rng.random_range(0..S_RECEPTORS as u8);
             }
         }
 
@@ -881,6 +970,8 @@ mod tests {
             secrete_rate: 0.0,
             ext_species: 0,
             int_species: 0,
+            gate_receptor: 0,
+            gate_weight: 0.0,
         }
     }
 
@@ -945,6 +1036,8 @@ mod tests {
             secrete_rate: 0.0,
             ext_species: 2,
             int_species: 2,
+            gate_receptor: 0,
+            gate_weight: 0.0,
         };
         let mut cell = test_cell(ruleset);
         let mut ext = [0.0f32; S_EXT];
@@ -964,6 +1057,8 @@ mod tests {
             secrete_rate: 0.0,
             ext_species: 2,
             int_species: 2,
+            gate_receptor: 0,
+            gate_weight: 0.0,
         };
         let sim = SimulationConfig::default();
         let mut cell = test_cell(ruleset);
@@ -985,12 +1080,16 @@ mod tests {
             secrete_rate: 0.0,
             ext_species: 2,
             int_species: 2,
+            gate_receptor: 0,
+            gate_weight: 0.0,
         };
         ruleset.transport[1] = TransportParams {
             uptake_rate: 100.0,
             secrete_rate: 0.0,
             ext_species: 2,
             int_species: 3,
+            gate_receptor: 0,
+            gate_weight: 0.0,
         };
         let mut cell = test_cell(ruleset);
         let mut ext = [0.0f32; S_EXT];
@@ -1010,12 +1109,16 @@ mod tests {
             secrete_rate: 100.0,
             ext_species: 2,
             int_species: 2,
+            gate_receptor: 0,
+            gate_weight: 0.0,
         };
         ruleset.transport[1] = TransportParams {
             uptake_rate: 0.0,
             secrete_rate: 100.0,
             ext_species: 3,
             int_species: 2,
+            gate_receptor: 0,
+            gate_weight: 0.0,
         };
         let mut cell = test_cell(ruleset);
         cell.internal[2] = 1.0;
@@ -1024,6 +1127,116 @@ mod tests {
 
         assert_eq!(cell.internal[2], 0.0);
         assert!((deltas[2] + deltas[3] - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn receptor_gate_can_increase_transport_rate() {
+        let mut ruleset = test_ruleset();
+        ruleset.receptors[2] = ReceptorParams {
+            k_half: 1.0,
+            n_hill: 1.0,
+            gain: 1.0,
+        };
+        ruleset.transport[0] = TransportParams {
+            uptake_rate: 1.0,
+            secrete_rate: 0.0,
+            ext_species: 2,
+            int_species: 2,
+            gate_receptor: 2,
+            gate_weight: 1.0,
+        };
+        let mut cell = test_cell(ruleset);
+        let mut ext = [0.0f32; S_EXT];
+        ext[2] = 1.0;
+
+        let (deltas, _) = cell.tick(&ext, 0.0, &SimulationConfig::default());
+
+        let expected = 1.5 * ext[2] / (1.0 + ext[2]);
+        assert!((cell.internal[2] - expected).abs() < 1e-6);
+        assert!((deltas[2] + expected).abs() < 1e-6);
+    }
+
+    #[test]
+    fn receptor_gate_can_decrease_transport_rate() {
+        let mut ruleset = test_ruleset();
+        ruleset.receptors[2] = ReceptorParams {
+            k_half: 1.0,
+            n_hill: 1.0,
+            gain: 1.0,
+        };
+        ruleset.transport[0] = TransportParams {
+            uptake_rate: 1.0,
+            secrete_rate: 0.0,
+            ext_species: 2,
+            int_species: 2,
+            gate_receptor: 2,
+            gate_weight: -1.0,
+        };
+        let mut cell = test_cell(ruleset);
+        let mut ext = [0.0f32; S_EXT];
+        ext[2] = 1.0;
+
+        let (deltas, _) = cell.tick(&ext, 0.0, &SimulationConfig::default());
+
+        let expected = 0.5 * ext[2] / (1.0 + ext[2]);
+        assert!((cell.internal[2] - expected).abs() < 1e-6);
+        assert!((deltas[2] + expected).abs() < 1e-6);
+    }
+
+    #[test]
+    fn receptor_gate_uses_selected_receptor_not_transport_species() {
+        let mut ruleset = test_ruleset();
+        ruleset.receptors[1] = ReceptorParams {
+            k_half: 0.5,
+            n_hill: 2.0,
+            gain: 1.0,
+        };
+        ruleset.transport[0] = TransportParams {
+            uptake_rate: 1.0,
+            secrete_rate: 0.0,
+            ext_species: 2,
+            int_species: 2,
+            gate_receptor: 1,
+            gate_weight: 1.0,
+        };
+        let mut without_signal = test_cell(ruleset.clone());
+        let mut with_signal = test_cell(ruleset);
+        let mut ext = [0.0f32; S_EXT];
+        ext[2] = 1.0;
+
+        without_signal.tick(&ext, 0.0, &SimulationConfig::default());
+        ext[1] = 0.5;
+        with_signal.tick(&ext, 0.0, &SimulationConfig::default());
+
+        assert!(with_signal.internal[2] > without_signal.internal[2]);
+    }
+
+    #[test]
+    fn degenerate_gate_is_bounded_and_can_shut_off_transport() {
+        let mut ruleset = test_ruleset();
+        ruleset.receptors[2] = ReceptorParams {
+            k_half: 1e-12,
+            n_hill: 100.0,
+            gain: 1e9,
+        };
+        ruleset.transport[0] = TransportParams {
+            uptake_rate: 100.0,
+            secrete_rate: 0.0,
+            ext_species: 2,
+            int_species: 2,
+            gate_receptor: 2,
+            gate_weight: -100.0,
+        };
+        let mut cell = test_cell(ruleset);
+        let mut ext = [0.0f32; S_EXT];
+        ext[2] = 1.0;
+
+        let (deltas, _) = cell.tick(&ext, 0.0, &SimulationConfig::default());
+
+        assert_eq!(cell.internal[2], 0.0);
+        assert_eq!(deltas[2], 0.0);
+        assert!(cell.internal.iter().all(|value| value.is_finite()));
+        assert!(deltas.iter().all(|value| value.is_finite()));
     }
 
     #[test]

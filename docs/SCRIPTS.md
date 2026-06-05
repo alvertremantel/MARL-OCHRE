@@ -123,8 +123,8 @@ python scripts/inspect_rulesets.py <path> --no-cell-sample
 ### Checks Performed
 
 1. **Magic bytes:** Verifies the file begins with `MRSF`.
-2. **Format version:** Confirms version matches the expected value (currently 1).
-3. **Ruleset byte size:** Confirms each canonical ruleset payload is exactly 536 bytes.
+2. **Format version:** Confirms the file is a supported full-ruleset layout: current v2/576-byte payloads or legacy v1/536-byte payloads.
+3. **Ruleset byte size:** Confirms each canonical ruleset payload matches the version-specific size. Legacy v1 transporters are decoded without gate fields.
 4. **File size:** Validates total size matches `header(24) + dict_count × ruleset_size + cell_count × cell_ref_stride(10)`.
 5. **Dict ID range:** Every per-cell `dict_id` reference must be within dictionary bounds.
 
@@ -150,18 +150,18 @@ Inspecting: output/run_128x128x64/tick_1000.rulesets.bin.zst
 
   ── Header ──
   Magic:    MRSF
-  Version:  1
+  Version:  2
   Flags:    0
   Dict entries: 82
   Cells:        527
-  Ruleset byte size: 536
+  Ruleset byte size: 576
   Compression: 82 unique / 527 cells = 15.6% unique
 
   ── Layout ──
   Header:            24 B
-  Dictionary:        43,952 B (82 × 536)
+  Dictionary:        47,232 B (82 × 576)
   Per-cell refs:     5,270 B (527 × 10)
-  Total:             49,246 B
+  Total:             52,526 B
 
   ── Dict Usage ──
   Dict usage: 82 unique entries across 527 cell refs
@@ -173,9 +173,9 @@ Inspecting: output/run_128x128x64/tick_1000.rulesets.bin.zst
     ...
 
   ── Ruleset Glimpse ──
-  Decoded glimpse (dict entry 0, 536 B):
+  Decoded glimpse (dict entry 0, 576 B):
     receptor[0]: {'k_half': 1.5, 'n_hill': 2.3, 'gain': 0.8}
-    transport[0]: {'uptake_rate': 3.0, 'secrete_rate': 4.0, 'ext_species': 0, 'int_species': 0}
+    transport[0]: {'uptake_rate': 3.0, 'secrete_rate': 4.0, 'ext_species': 0, 'int_species': 0, 'gate_receptor': 0, 'gate_weight': 0.0}
     reaction[0]: {'substrate': 0, 'product': 1, 'catalyst': 2, 'cofactor': 255, 'k_m': 5.0, 'v_max': 6.0, 'k_cat': 7.0}
     effector[0]: {'threshold': 8.0, 'rate': 9.0, 'int_species': 0, 'ext_species': 0}
     fate: {'division_energy': 10.0, 'death_energy': 11.0, 'quiescence_energy': 12.0, 'division_prep_ticks': 13.0}
