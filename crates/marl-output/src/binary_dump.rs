@@ -1,4 +1,4 @@
-//! Binary outputs for high-throughput viewer and analysis ingestion.
+//! Binary viewer/analysis records.
 
 use marl_cell::cell::{CellState, Ruleset};
 use marl_config::*;
@@ -38,6 +38,108 @@ fn viewer_cell_from(cell: &CellState) -> ViewerCellRecord {
         starter_type: cell.starter_type,
         energy: cell.internal[0],
     }
+}
+
+fn validate_cell_position(cell: &CellState, index: usize, context: &str) -> std::io::Result<()> {
+    let [x, y, z] = cell.pos;
+    if x as usize >= GRID_X || y as usize >= GRID_Y || z as usize >= GRID_Z {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            format!(
+                "{context} cell {index} position ({x},{y},{z}) out of bounds ({GRID_X},{GRID_Y},{GRID_Z})"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_cell_for_viewer_dump(
+    cell: &CellState,
+    index: usize,
+    context: &str,
+) -> std::io::Result<()> {
+    validate_cell_position(cell, index, context)?;
+    if !cell.internal[0].is_finite() {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            format!("{context} cell {index} energy is not finite"),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_ruleset_finite(
+    ruleset: &Ruleset,
+    cell_index: usize,
+    context: &str,
+) -> std::io::Result<()> {
+    for (i, receptor) in ruleset.receptors.iter().enumerate() {
+        for (name, value) in [
+            ("k_half", receptor.k_half),
+            ("n_hill", receptor.n_hill),
+            ("gain", receptor.gain),
+        ] {
+            if !value.is_finite() {
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    format!("{context} cell {cell_index} receptor {i} {name} is not finite"),
+                ));
+            }
+        }
+    }
+    for (i, transport) in ruleset.transport.iter().enumerate() {
+        for (name, value) in [
+            ("uptake_rate", transport.uptake_rate),
+            ("secrete_rate", transport.secrete_rate),
+        ] {
+            if !value.is_finite() {
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    format!("{context} cell {cell_index} transport {i} {name} is not finite"),
+                ));
+            }
+        }
+    }
+    for (i, reaction) in ruleset.reactions.iter().enumerate() {
+        for (name, value) in [
+            ("k_m", reaction.k_m),
+            ("v_max", reaction.v_max),
+            ("k_cat", reaction.k_cat),
+        ] {
+            if !value.is_finite() {
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    format!("{context} cell {cell_index} reaction {i} {name} is not finite"),
+                ));
+            }
+        }
+    }
+    for (i, effector) in ruleset.effectors.iter().enumerate() {
+        for (name, value) in [("threshold", effector.threshold), ("rate", effector.rate)] {
+            if !value.is_finite() {
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    format!("{context} cell {cell_index} effector {i} {name} is not finite"),
+                ));
+            }
+        }
+    }
+    for (name, value) in [
+        ("division_energy", ruleset.fate.division_energy),
+        ("death_energy", ruleset.fate.death_energy),
+        ("quiescence_energy", ruleset.fate.quiescence_energy),
+        ("division_prep_ticks", ruleset.fate.division_prep_ticks),
+        ("hgt_propensity", ruleset.hgt_propensity),
+        ("mutation_rate", ruleset.mutation_rate),
+    ] {
+        if !value.is_finite() {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                format!("{context} cell {cell_index} {name} is not finite"),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn compressed_pattern(base: &str, compression: BinaryCompression) -> String {
@@ -125,6 +227,9 @@ pub fn write_field_dump(field: &Field, tick: u64, out: &OutputConfig) -> std::io
 
 pub fn write_cell_dump(cells: &[CellState], tick: u64, out: &OutputConfig) -> std::io::Result<()> {
     fs::create_dir_all(&out.output_dir)?;
+    for (index, cell) in cells.iter().enumerate() {
+        validate_cell_for_viewer_dump(cell, index, "cell dump")?;
+    }
     let viewer_cells: Vec<ViewerCellRecord> = cells.iter().map(viewer_cell_from).collect();
     let path = binary_file_path(out, tick, "cells");
     write_binary_payload(&path, as_bytes(&viewer_cells), out)
@@ -169,14 +274,24 @@ pub fn write_ruleset_layer_dump(
 ) -> std::io::Result<()> {
     fs::create_dir_all(&out.output_dir)?;
 
-    let mut bytes = Vec::with_capacity(GRID_Z * RULESET_LAYER_RECORD_STRIDE);
+    for (index, cell) in cells.iter().enumerate() {
+        validate_cell_position(cell, index, "ruleset layer dump")?;
+        validate_ruleset_finite(&cell.ruleset, index, "ruleset layer dump")?;
+    }
+
+    let capacity = GRID_Z
+        .checked_mul(RULESET_LAYER_RECORD_STRIDE)
+        .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "ruleset layer size overflow"))?;
+    let mut bytes = Vec::with_capacity(capacity);
     for z in 0..GRID_Z {
         let mut sums = [0.0f64; RULESET_LAYER_AVG_F32_COUNT];
         let mut count: u32 = 0;
 
         for cell in cells.iter().filter(|cell| cell.pos[2] as usize == z) {
             append_ruleset_layer_values(&mut sums, &cell.ruleset);
-            count += 1;
+            count = count
+                .checked_add(1)
+                .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "layer cell count overflow"))?;
         }
 
         bytes.extend_from_slice(&(z as u16).to_le_bytes());
@@ -263,7 +378,8 @@ fn ruleset_to_canonical_bytes(ruleset: &Ruleset) -> [u8; RULESET_FULL_CANONICAL_
 /// Write a deduplicated full ruleset dump for all cells at a tick.
 ///
 /// Identical rulesets are stored once in a dictionary; each cell references
-/// its dictionary entry by ID. The file layout:
+/// its dictionary entry by ID and position. This is genotype-by-position data,
+/// not lineage, energy, or internal pool state. The file layout:
 ///
 /// ```text
 /// HEADER (24 bytes):
@@ -289,6 +405,11 @@ pub fn write_ruleset_full_dump(
     out: &OutputConfig,
 ) -> std::io::Result<()> {
     fs::create_dir_all(&out.output_dir)?;
+
+    for (index, cell) in cells.iter().enumerate() {
+        validate_cell_position(cell, index, "full ruleset dump")?;
+        validate_ruleset_finite(&cell.ruleset, index, "full ruleset dump")?;
+    }
 
     let ruleset_byte_size = RULESET_FULL_CANONICAL_SIZE;
     let cell_count = u32::try_from(cells.len()).map_err(|_| {
@@ -392,18 +513,20 @@ struct RunMetaFile {
 pub fn write_run_meta(out: &OutputConfig) -> std::io::Result<()> {
     fs::create_dir_all(&out.output_dir)?;
     let path = Path::new(&out.output_dir).join("run_meta.json");
-    let file = File::create(path)?;
-    let writer = BufWriter::new(file);
-    let field_count = GRID_X * GRID_Y * GRID_Z * S_EXT;
-    let field_byte_len =
-        field_byte_len(GRID_X as u32, GRID_Y as u32, GRID_Z as u32, S_EXT as u32).unwrap_or(0);
+    let field_count = GRID_X
+        .checked_mul(GRID_Y)
+        .and_then(|v| v.checked_mul(GRID_Z))
+        .and_then(|v| v.checked_mul(S_EXT))
+        .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "field count overflow"))?;
+    let field_byte_len = field_byte_len(GRID_X as u32, GRID_Y as u32, GRID_Z as u32, S_EXT as u32)
+        .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "field byte length overflow"))?;
     let ruleset_stride = ruleset_layer_record_stride(
         S_RECEPTORS as u32,
         S_TRANSPORTERS as u32,
         R_MAX as u32,
         S_EFFECTORS as u32,
     )
-    .unwrap_or(0);
+    .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "ruleset layer stride overflow"))?;
 
     let mode = out.ruleset_output_mode;
     let writes_full = mode.writes_full_dump();
@@ -454,8 +577,19 @@ pub fn write_run_meta(out: &OutputConfig) -> std::io::Result<()> {
         ruleset_full_payload_layout: writes_full.then_some(RULESET_FULL_PAYLOAD_LAYOUT),
     };
 
-    serde_json::to_writer_pretty(writer, &meta)?;
-    Ok(())
+    let temp_path = temp_path_for(&path);
+    let result = (|| -> std::io::Result<()> {
+        let file = File::create(&temp_path)?;
+        let mut writer = BufWriter::new(file);
+        serde_json::to_writer_pretty(&mut writer, &meta)?;
+        writer.flush()?;
+        commit_temp_path(&temp_path, &path)
+    })();
+
+    if result.is_err() {
+        let _ = fs::remove_file(&temp_path);
+    }
+    result
 }
 
 #[cfg(test)]
@@ -628,6 +762,24 @@ mod tests {
     }
 
     #[test]
+    fn write_cell_dump_rejects_invalid_cell_record_values() {
+        let out_dir = test_output_dir("marl_output_cells_invalid_test");
+        let mut out = OutputConfig::default();
+        out.output_dir = out_dir.clone();
+
+        let out_of_bounds = vec![test_cell([GRID_X as u16, 0, 0], 42, 4.5)];
+        let err = write_cell_dump(&out_of_bounds, 9, &out).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("out of bounds"));
+
+        let mut nonfinite = test_cell([1, 2, 3], 42, 4.5);
+        nonfinite.internal[0] = f32::NAN;
+        let err = write_cell_dump(&[nonfinite], 10, &out).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("energy"));
+    }
+
+    #[test]
     fn write_ruleset_layer_dump_writes_expected_stride_and_average() {
         let out_dir = test_output_dir("marl_output_ruleset_layer_test");
         let mut out = OutputConfig::default();
@@ -660,6 +812,30 @@ mod tests {
         assert_eq!(u32::from_le_bytes(third[4..8].try_into().unwrap()), 0);
         let zero_k_half = f32::from_le_bytes(third[8..12].try_into().unwrap());
         assert_eq!(zero_k_half, 0.0);
+    }
+
+    #[test]
+    fn write_ruleset_dumps_reject_invalid_cells_and_rulesets() {
+        let out_dir = test_output_dir("marl_output_ruleset_invalid_test");
+        let mut out = OutputConfig::default();
+        out.output_dir = out_dir.clone();
+
+        let out_of_bounds = vec![test_cell([0, 0, GRID_Z as u16], 1, 1.0)];
+        let err = write_ruleset_layer_dump(&out_of_bounds, 7, &out).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("out of bounds"));
+        let err = write_ruleset_full_dump(&out_of_bounds, 7, &out).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("out of bounds"));
+
+        let mut nonfinite = test_cell([0, 0, 0], 1, 1.0);
+        nonfinite.ruleset.receptors[0].k_half = f32::INFINITY;
+        let err = write_ruleset_layer_dump(&[nonfinite.clone()], 8, &out).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("not finite"));
+        let err = write_ruleset_full_dump(&[nonfinite], 8, &out).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("not finite"));
     }
 
     #[test]

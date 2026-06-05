@@ -11,6 +11,19 @@ import subprocess
 from pathlib import Path
 
 
+POSITION_INTEGER_TOLERANCE = 0.001
+CANONICAL_RULESET_SIZE = 536
+RULESET_FLOAT_SECTIONS = (
+    (0, 8, 12, (0, 4, 8), "receptor"),
+    (96, 8, 10, (0, 4), "transport"),
+    (176, 16, 16, (4, 8, 12), "reaction"),
+    (432, 8, 10, (0, 4), "effector"),
+    (512, 1, 16, (0, 4, 8, 12), "fate"),
+    (528, 1, 4, (0,), "hgt_propensity"),
+    (532, 1, 4, (0,), "mutation_rate"),
+)
+
+
 def resolve_pattern(meta: dict, key: str, tick: int, default: str) -> Path:
     pattern = str(meta.get(key, default))
     if "<T>" not in pattern:
@@ -29,6 +42,128 @@ def read_maybe_compressed(path: Path) -> bytes:
         except subprocess.CalledProcessError as exc:
             raise SystemExit(f"failed to decompress {path}: {exc}") from exc
     return path.read_bytes()
+
+
+def cadence_due(tick: int, max_ticks: int, interval: int) -> bool:
+    return tick + 1 == max_ticks or (interval > 0 and tick % interval == 0)
+
+
+def ruleset_sidecar_due(meta: dict, tick: int) -> bool:
+    return cadence_due(tick, int(meta["max_ticks"]), int(meta["ruleset_interval"]))
+
+
+def validate_field_floats(payload: bytes) -> None:
+    if len(payload) % 4 != 0:
+        raise SystemExit(
+            f"field file size {len(payload)} is not divisible by f32 width 4"
+        )
+    for i, (value,) in enumerate(struct.iter_unpack("<f", payload)):
+        if not math.isfinite(value):
+            raise SystemExit(f"field value {i} is not finite: {value!r}")
+
+
+def validate_cell_payload(payload: bytes, stride: int, meta: dict) -> None:
+    if len(payload) % stride != 0:
+        raise SystemExit(
+            f"cell file size {len(payload)} is not divisible by stride {stride}"
+        )
+
+    bounds = (
+        ("x", int(meta["grid_x"])),
+        ("y", int(meta["grid_y"])),
+        ("z", int(meta["grid_z"])),
+    )
+    for index in range(len(payload) // stride):
+        off = index * stride
+        positions = struct.unpack_from("<fff", payload, off)
+        energy = struct.unpack_from("<f", payload, off + 21)[0]
+
+        for axis, value in enumerate(positions):
+            name, limit = bounds[axis]
+            if not math.isfinite(value) or value < 0.0:
+                raise SystemExit(
+                    f"cell {index}: position {name}={value!r} is not a finite non-negative float"
+                )
+            rounded = round(value)
+            if abs(value - rounded) > POSITION_INTEGER_TOLERANCE:
+                raise SystemExit(
+                    f"cell {index}: position {name}={value!r} is not close to an integer voxel index"
+                )
+            if rounded >= limit:
+                raise SystemExit(
+                    f"cell {index}: position {name}={value!r} out of bounds (grid_{name}={limit})"
+                )
+
+        if not math.isfinite(energy):
+            raise SystemExit(f"cell {index}: energy={energy!r} is not finite")
+
+
+def validate_ruleset_layer_payload(payload: bytes, stride: int, meta: dict) -> None:
+    if len(payload) % stride != 0:
+        raise SystemExit(
+            f"ruleset file size {len(payload)} is not divisible by stride {stride}"
+        )
+    if stride < 8 or (stride - 8) % 4 != 0:
+        raise SystemExit(f"ruleset_layer_record_stride has invalid layout: {stride}")
+
+    grid_x = int(meta["grid_x"])
+    grid_y = int(meta["grid_y"])
+    grid_z = int(meta["grid_z"])
+    max_layer_cells = grid_x * grid_y
+    layer_records = len(payload) // stride
+    if layer_records != grid_z:
+        raise SystemExit(
+            f"ruleset layer record count mismatch: got {layer_records}, expected {grid_z}"
+        )
+
+    avg_count = (stride - 8) // 4
+    for index in range(layer_records):
+        off = index * stride
+        z = struct.unpack_from("<H", payload, off)[0]
+        reserved = struct.unpack_from("<H", payload, off + 2)[0]
+        cell_count = struct.unpack_from("<I", payload, off + 4)[0]
+
+        if z != index:
+            raise SystemExit(
+                f"ruleset layer {index}: z index mismatch: got {z}, expected {index}"
+            )
+        if z >= grid_z:
+            raise SystemExit(f"ruleset layer {index}: z index {z} >= grid_z {grid_z}")
+        if reserved != 0:
+            raise SystemExit(
+                f"ruleset layer {index}: reserved field is {reserved}, expected 0"
+            )
+        if cell_count > max_layer_cells:
+            raise SystemExit(
+                f"ruleset layer {index}: cell_count {cell_count} exceeds layer capacity {max_layer_cells}"
+            )
+
+        for avg_index in range(avg_count):
+            value = struct.unpack_from("<f", payload, off + 8 + avg_index * 4)[0]
+            if not math.isfinite(value):
+                raise SystemExit(
+                    f"ruleset layer {index}: average {avg_index} is not finite: {value!r}"
+                )
+
+
+def validate_ruleset_dictionary_floats(
+    payload: bytes, dict_off: int, dict_count: int, ruleset_byte_size: int
+) -> None:
+    if ruleset_byte_size != CANONICAL_RULESET_SIZE:
+        return
+
+    for dict_id in range(dict_count):
+        base = dict_off + dict_id * ruleset_byte_size
+        for section_off, count, stride, float_offsets, section_name in RULESET_FLOAT_SECTIONS:
+            for entry_index in range(count):
+                entry_base = base + section_off + entry_index * stride
+                for rel_off in float_offsets:
+                    value = struct.unpack_from("<f", payload, entry_base + rel_off)[0]
+                    if not math.isfinite(value):
+                        raise SystemExit(
+                            f"full ruleset dict[{dict_id}] {section_name}[{entry_index}] "
+                            f"float@+{rel_off} is not finite: {value!r}"
+                        )
 
 
 def check_full_ruleset(run_dir: Path, meta: dict, tick: int) -> None:
@@ -88,6 +223,9 @@ def check_full_ruleset(run_dir: Path, meta: dict, tick: int) -> None:
             f"full ruleset file size mismatch: got {len(payload)}, expected {expected_total} "
             f"(dict_count={dict_count}, cell_count={cell_count}, ruleset_byte_size={ruleset_byte_size})"
         )
+
+    dict_off = header_size
+    validate_ruleset_dictionary_floats(payload, dict_off, dict_count, ruleset_byte_size)
 
     # Validate dict IDs in cell refs are in range
     cell_refs_off = header_size + dict_count * ruleset_byte_size
@@ -162,6 +300,7 @@ def main() -> None:
     first = struct.unpack("<f", field_payload[:4])[0]
     if not math.isfinite(first):
         raise SystemExit(f"first field value is not finite: {first!r}")
+    validate_field_floats(field_payload)
 
     stride = int(meta["cell_record_stride"])
     if stride != 25:
@@ -172,37 +311,34 @@ def main() -> None:
         )
         cell_payload = read_maybe_compressed(cells_path)
         cell_bytes = len(cell_payload)
-        if cell_bytes % stride != 0:
-            raise SystemExit(
-                f"cell file size {cell_bytes} is not divisible by stride {stride}"
-            )
+        validate_cell_payload(cell_payload, stride, meta)
     else:
         cell_bytes = 0
 
     ruleset_mode = str(meta.get("ruleset_output_mode", "off"))
-    if args.require_rulesets or ruleset_mode in ("layer_averages", "both"):
+    auto_ruleset_due = (
+        ruleset_mode in ("layer_averages", "both")
+        and ruleset_sidecar_due(meta, args.tick)
+    )
+    if args.require_rulesets or auto_ruleset_due:
         ruleset_path = args.run_dir / resolve_pattern(
             meta,
             "ruleset_layer_file_pattern",
             args.tick,
             "tick_<T>.ruleset_layers.bin",
         )
+        if not ruleset_path.exists():
+            raise SystemExit(f"ruleset layer file not found: {ruleset_path}")
         ruleset_stride = int(meta.get("ruleset_layer_record_stride", 0))
         if ruleset_stride <= 0:
             raise SystemExit("ruleset_layer_record_stride missing or invalid")
         ruleset_payload = read_maybe_compressed(ruleset_path)
-        if len(ruleset_payload) % ruleset_stride != 0:
-            raise SystemExit(
-                f"ruleset file size {len(ruleset_payload)} is not divisible by stride {ruleset_stride}"
-            )
-        grid_z = int(meta["grid_z"])
-        layer_records = len(ruleset_payload) // ruleset_stride
-        if layer_records != grid_z:
-            raise SystemExit(
-                f"ruleset layer record count mismatch: got {layer_records}, expected {grid_z}"
-            )
+        validate_ruleset_layer_payload(ruleset_payload, ruleset_stride, meta)
 
-    if args.require_full_rulesets or ruleset_mode in ("full", "both"):
+    auto_full_ruleset_due = ruleset_mode in ("full", "both") and ruleset_sidecar_due(
+        meta, args.tick
+    )
+    if args.require_full_rulesets or auto_full_ruleset_due:
         check_full_ruleset(args.run_dir, meta, args.tick)
 
     print(

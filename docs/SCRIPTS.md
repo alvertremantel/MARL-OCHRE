@@ -6,10 +6,11 @@ This document describes utility scripts in the `scripts/` directory.
 
 ## `check_binary_dump.py`
 
-**Purpose:** Sanity-checks MARL binary output files (field dump, cell dump,
-optional ruleset-layer dump, optional full ruleset dump, and metadata) for a given tick.
+**Purpose:** Sanity-checks MARL binary output files (field dump, compact viewer
+cell records, optional ruleset-layer averages, optional ruleset genotype dump,
+and metadata) for a given tick.
 
-**Requirements:** Python 3.6+; for compressed `.zst` snapshots, the `zstd` CLI
+**Requirements:** Python 3.7+; for compressed `.zst` snapshots, the `zstd` CLI
 must also be available on `PATH`.
 
 ### Usage
@@ -24,7 +25,7 @@ python scripts/check_binary_dump.py <run_dir> <tick> --require-full-rulesets
 
 | Argument | Description |
 |----------|-------------|
-| `run_dir` | Path to the engine output directory containing `run_meta.json`, field snapshots, and cell snapshots when `write_binary_cells = true` |
+| `run_dir` | Path to the engine output directory containing `run_meta.json`, field dumps, and compact viewer cell records when `write_binary_cells = true` |
 | `tick` | Tick number to inspect (e.g., `0`, `500`, `1000`) |
 | `--require-rulesets` | Also require and validate `tick_<N>.ruleset_layers.bin(.zst)` using metadata stride/count fields |
 | `--require-full-rulesets` | Also require and validate `tick_<N>.rulesets.bin(.zst)` using metadata header/cell-ref/dict fields |
@@ -35,14 +36,15 @@ python scripts/check_binary_dump.py <run_dir> <tick> --require-full-rulesets
    fields (`endianness`, `field_dtype`, `field_layout`, snapshot patterns, and
    `cell_record_stride`).
 2. **Field file size:** Verifies that the decompressed `tick_<T>.field.bin(.zst)` payload has exactly `field_byte_len` bytes.
-3. **First field value:** Reads the first `f32` (little-endian) from the field
-   file and confirms it is a finite number (not `NaN` or `inf`).
-4. **Cell file integrity:** When `write_binary_cells = true`, verifies that the decompressed `tick_<T>.cells.bin(.zst)` payload size is evenly divisible by `cell_record_stride`; otherwise reports zero cells without requiring a cell file.
-5. **Ruleset layer integrity (optional):** When enabled in metadata or via `--require-rulesets`, verifies that `tick_<T>.ruleset_layers.bin(.zst)` contains exactly `grid_z` fixed-stride records.
-6. **Full ruleset integrity (optional):** When enabled in metadata or via `--require-full-rulesets`, verifies:
-   - Magic bytes (`MRSF`) and format version match
-   - File size matches `header + dict_count × ruleset_byte_size + cell_count × cell_ref_stride`
-   - All per-cell dict_id references are within dictionary bounds
+3. **Field values:** Reads every little-endian `f32` from the field file and
+   confirms each value is finite (not `NaN` or `inf`).
+4. **Cell file integrity:** When `write_binary_cells = true`, parses every compact cell record and verifies payload stride, finite/integer/in-bounds positions, and finite energy; otherwise reports zero cells without requiring a cell file.
+5. **Ruleset layer integrity (optional):** When enabled and due on the ruleset cadence, or via `--require-rulesets`, verifies that `tick_<T>.ruleset_layers.bin(.zst)` contains exactly `grid_z` fixed-stride records with ordered layer indices, zero reserved fields, plausible per-layer cell counts, and finite averages. These records are slot-wise averages of continuous parameters only; topology/species IDs are not present.
+6. **Full ruleset integrity (optional):** When enabled in metadata or via `--require-full-rulesets`, verifies the per-cell genotype-by-position dump:
+    - Magic bytes (`MRSF`) and format version match
+    - File size matches `header + dict_count × ruleset_byte_size + cell_count × cell_ref_stride`
+    - All per-cell dict_id references are within dictionary bounds
+    - All canonical dictionary float fields are finite
    - All cell positions are within grid bounds
 
 ### Output
@@ -90,9 +92,11 @@ python scripts/check_binary_dump.py output/run_128x128x64 5000
 **Purpose:** Inspect a MARL full deduplicated ruleset dump file
 (`tick_<T>.rulesets.bin` or `tick_<T>.rulesets.bin.zst`). Prints a
 human-readable summary of the on-disk structure, dictionary usage statistics,
-and a decoded glimpse of one ruleset entry.
+and a decoded glimpse of one ruleset entry. The file stores ruleset genotypes
+and per-cell positions; lineage, energy, and internal pools live outside this
+format.
 
-**Requirements:** Python 3.6+; for compressed `.zst` files, the `zstd` CLI
+**Requirements:** Python 3.7+; for compressed `.zst` files, the `zstd` CLI
 must also be available on `PATH`.
 
 ### Usage

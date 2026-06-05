@@ -70,8 +70,9 @@ cargo run -p marl-engine --release -- --ticks 5000 --stats 100 --snapshot 500 --
 ```
 
 This runs 5000 ticks with the default `128×128×64` grid and three seeded
-microbial metabolisms. Stats print to stdout every 100 ticks, snapshots write
-every 500 ticks, and PPM images (if enabled in TOML) write every 500 ticks.
+microbial metabolisms. Stats print to stdout every 100 ticks, binary viewer
+dumps write every 500 ticks, and PPM images (if enabled in TOML) write every
+500 ticks.
 
 ### CLI flags
 
@@ -240,7 +241,7 @@ Runs write into `output_dir` (default: `output/run_128x128x64`).
 |------|--------|-------------|
 | `run_meta.json` | JSON | Grid dimensions, species counts, binary byte layouts, snapshot interval |
 | `tick_<T>.field.bin.zst` | zstd-compressed raw f32 LE | Full extracellular field in `[z][y][x][species]` order when `write_binary_field = true` |
-| `tick_<T>.cells.bin.zst` | zstd-compressed packed binary | Sparse cell records (pos, lineage_id, starter_type, energy) when `write_binary_cells = true` |
+| `tick_<T>.cells.bin.zst` | zstd-compressed packed binary | Sparse viewer cell records (pos, lineage_id, starter_type, energy) when `write_binary_cells = true`; not full cell state |
 | `summary.md` | Markdown | End-of-run population, chemistry, and configuration summary |
 
 ### Opt-in via `marl.toml`
@@ -252,8 +253,8 @@ Runs write into `output_dir` (default: `output/run_128x128x64`).
 | `stoich_ticks.csv` | `write_stoich_tick_log = true` | Per-tick stoichiometry audit totals with gross imbalance columns plus net signed deltas |
 | `stoich_v2_summary.json` | `write_stoich_v2_summary = true` or stoich enforcement enabled | Versioned full-system ledger with stage and reservoir totals |
 | `stoich_v2_events.csv` | `write_stoich_v2_events = true` | Per-event full-system stoichiometry rows |
-| `tick_<T>.ruleset_layers.bin.zst` | `ruleset_output_mode = "layer_averages"` or `"both"` | Per-z-layer continuous ruleset-parameter averages |
-| `tick_<T>.rulesets.bin.zst` | `ruleset_output_mode = "full"` or `"both"` | Deduplicated per-cell full ruleset dump with dictionary |
+| `tick_<T>.ruleset_layers.bin.zst` | `ruleset_output_mode = "layer_averages"` or `"both"` | Per-z-layer slot-wise averages of continuous ruleset parameters; topology/species IDs are omitted, so slots can mix semantics |
+| `tick_<T>.rulesets.bin.zst` | `ruleset_output_mode = "full"` or `"both"` | Deduplicated per-cell ruleset genotype dump with dictionary and positions; omits lineage, energy, and internal pools unless combined with cell records |
 | `chem_<tick>.csv` | `write_csv_snapshots = true` | Full field dump as CSV |
 | `cells_<tick>.csv` | `write_csv_snapshots = true` | All cell states as CSV |
 | `reactions_<tick>.csv` | `write_csv_snapshots = true` | All active reactions as CSV |
@@ -283,6 +284,7 @@ See [`docs/SCRIPTS.md`](SCRIPTS.md) for details.
 - The viewer auto-detects both raw and `.zst` snapshots from `run_meta.json`.
 - `field_byte_len` in `run_meta.json` always describes the **decompressed** field size.
 - The viewer requires `write_binary_field = true`; cell overlays are skipped when `write_binary_cells = false`.
+- Binary field, cell, and ruleset files are viewer/analysis records. They do not contain enough state to resume a simulation.
 
 ---
 

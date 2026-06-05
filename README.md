@@ -18,8 +18,8 @@ The current codebase is a Winogradsky-column style simulation: oxidant and carbo
 - Computes a per-voxel light field from top-down Beer-Lambert attenuation
 - Updates each cell through receptor, transport, reaction, effector, and fate phases
 - Supports mutation of kinetic parameters and rare structural rewiring of reactions
-- Writes losslessly compressed binary field/cell snapshots for viewer ingestion, plus optional CSV/PPM diagnostics
-- Can optionally write per-layer ruleset-parameter averages on a slower cadence than field/cell snapshots
+- Writes compressed binary field arrays and compact viewer cell records, plus optional CSV/PPM diagnostics
+- Can optionally write per-layer ruleset-parameter averages or per-cell genotype records on a slower cadence
 
 ## Key Crates
 
@@ -56,7 +56,7 @@ A detailed architecture walkthrough lives in [`docs/INFO.md`](docs/INFO.md).
 - Evolution path: vertical mutation during division
 - Configuration: runtime TOML + CLI for most physics and output parameters; grid dimensions remain compile-time
 
-This repository is a functional prototype, not a polished platform. The core simulation loop, field physics, lineage tracking, snapshots, run summaries, and viewer are implemented. Several intended extensions are present only in partial form.
+This repository is a functional prototype, not a polished platform. The core simulation loop, field physics, lineage tracking, viewer-oriented dumps, run summaries, and interactive viewer are implemented. Several intended extensions are present only in partial form.
 
 ## Status Summary
 
@@ -77,7 +77,7 @@ cargo run -p marl-engine --release -- --ticks 5000 --stats 100 --snapshot 500
 # View the results
 cargo run -p marl-viewer-rs --release -- output/run_128x128x64 --tick 0
 
-# Validate a binary snapshot
+# Validate a binary viewer dump
 python scripts/check_binary_dump.py output/run_128x128x64 0
 ```
 

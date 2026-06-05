@@ -1,5 +1,6 @@
 use std::error::Error;
 use std::fs::{self, File};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use marl_format::RunMeta;
@@ -71,7 +72,7 @@ pub fn load_snapshot(args: &ViewerArgs) -> Result<SnapshotPayload, Box<dyn Error
         );
     }
     let field_path = snapshot_path(&args.output_dir, &meta.field_file_pattern, args.tick)?;
-    let field_bytes = read_binary_payload(&field_path)?;
+    let field_bytes = read_binary_payload_bounded(&field_path, meta.field_byte_len)?;
     if field_bytes.len() as u64 != meta.field_byte_len {
         return Err(format!(
             "{} has {} bytes, expected {} from run_meta.json",
@@ -176,20 +177,18 @@ fn load_cell_records(args: &ViewerArgs, meta: &RunMeta) -> Result<Vec<LoadedCell
     let cells_path = snapshot_path(&args.output_dir, &meta.cell_file_pattern, args.tick)?;
 
     if !meta.write_binary_cells {
-        eprintln!(
-            "[viewer] warning: cell output was disabled for this run; rendering without cells"
-        );
-        return Ok(Vec::new());
+        return Err("cell output was disabled for this run but cells were requested".into());
     }
     if !cells_path.exists() {
-        eprintln!(
-            "[viewer] warning: cell file {} not found; rendering without cells",
+        return Err(format!(
+            "cell file {} not found but cells were requested",
             cells_path.display()
-        );
-        return Ok(Vec::new());
+        )
+        .into());
     }
 
-    let raw = read_binary_payload(&cells_path)?;
+    let max_cell_bytes = cell_byte_limit(meta)?;
+    let raw = read_binary_payload_bounded(&cells_path, max_cell_bytes)?;
 
     let stride = marl_format::CELL_RECORD_STRIDE as usize;
     if !raw.len().is_multiple_of(stride) {
@@ -222,15 +221,61 @@ fn snapshot_path(output_dir: &Path, pattern: &str, tick: u64) -> Result<PathBuf,
     Ok(output_dir.join(pattern.replace("<T>", &tick.to_string())))
 }
 
-fn read_binary_payload(path: &Path) -> Result<Vec<u8>, Box<dyn Error>> {
+fn read_binary_payload_bounded(
+    path: &Path,
+    max_decompressed_len: u64,
+) -> Result<Vec<u8>, Box<dyn Error>> {
+    if max_decompressed_len == u64::MAX {
+        return Err(format!(
+            "{} expected byte limit is too large to bound safely",
+            path.display()
+        )
+        .into());
+    }
     if path.extension().and_then(|ext| ext.to_str()) == Some("zst") {
         let file =
             File::open(path).map_err(|e| format!("failed to read {}: {e}", path.display()))?;
-        zstd::stream::decode_all(file)
-            .map_err(|e| format!("failed to decompress {}: {e}", path.display()).into())
+        let mut decoder = zstd::stream::Decoder::new(file)
+            .map_err(|e| format!("failed to decompress {}: {e}", path.display()))?;
+        let mut limited = (&mut decoder).take(max_decompressed_len + 1);
+        let mut bytes = Vec::new();
+        limited
+            .read_to_end(&mut bytes)
+            .map_err(|e| format!("failed to decompress {}: {e}", path.display()))?;
+        if bytes.len() as u64 > max_decompressed_len {
+            return Err(format!(
+                "{} decompressed to more than {} bytes",
+                path.display(),
+                max_decompressed_len
+            )
+            .into());
+        }
+        Ok(bytes)
     } else {
+        let len = fs::metadata(path)
+            .map_err(|e| format!("failed to read {}: {e}", path.display()))?
+            .len();
+        if len > max_decompressed_len {
+            return Err(format!(
+                "{} has {} bytes, expected at most {}",
+                path.display(),
+                len,
+                max_decompressed_len
+            )
+            .into());
+        }
         fs::read(path).map_err(|e| format!("failed to read {}: {e}", path.display()).into())
     }
+}
+
+fn cell_byte_limit(meta: &RunMeta) -> Result<u64, Box<dyn Error>> {
+    let count = u64::from(meta.grid_x)
+        .checked_mul(u64::from(meta.grid_y))
+        .and_then(|count| count.checked_mul(u64::from(meta.grid_z)))
+        .ok_or("cell byte limit overflowed grid dimensions")?;
+    count
+        .checked_mul(u64::from(marl_format::CELL_RECORD_STRIDE))
+        .ok_or_else(|| "cell byte limit overflowed record stride".into())
 }
 
 /// Parse a single 25-byte cell record manually with from_le_bytes.
@@ -334,6 +379,20 @@ mod tests {
 
     fn test_meta() -> RunMeta {
         RunMeta::new(128, 128, 64, 12, 16, true, true)
+    }
+
+    fn test_args(output_dir: PathBuf) -> ViewerArgs {
+        ViewerArgs {
+            output_dir,
+            tick: 0,
+            species: 0,
+            exposure: 18.0,
+            density_scale: 2.0,
+            steps: 160,
+            view_mode: crate::args::ViewMode::Iso,
+            cell_mode: CellMode::Starter,
+            cell_alpha: 0.95,
+        }
     }
 
     #[test]
@@ -536,8 +595,56 @@ mod tests {
         let payload = b"hello compressed world";
         fs::write(&path, zstd::stream::encode_all(&payload[..], 3).unwrap()).unwrap();
 
-        let decoded = read_binary_payload(&path).unwrap();
+        let decoded = read_binary_payload_bounded(&path, payload.len() as u64).unwrap();
         assert_eq!(decoded, payload);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn read_binary_payload_bounded_rejects_oversized_zstd() {
+        let dir = std::path::Path::new("/tmp/opencode/io_test_zstd_limit");
+        let _ = fs::remove_dir_all(dir);
+        fs::create_dir_all(dir).unwrap();
+        let path = dir.join("sample.bin.zst");
+        let payload = vec![7u8; 64];
+        fs::write(&path, zstd::stream::encode_all(&payload[..], 3).unwrap()).unwrap();
+
+        let err = read_binary_payload_bounded(&path, 63).unwrap_err();
+        assert!(err.to_string().contains("decompressed"), "got: {err}");
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn load_cell_records_errors_when_requested_file_missing() {
+        let dir = std::path::Path::new("/tmp/opencode/io_test_missing_cells");
+        let _ = fs::remove_dir_all(dir);
+        fs::create_dir_all(dir).unwrap();
+
+        let meta = test_meta();
+        let args = test_args(dir.to_path_buf());
+        let err = load_cell_records(&args, &meta).unwrap_err();
+        assert!(err.to_string().contains("not found"), "got: {err}");
+        assert!(
+            err.to_string().contains("cells were requested"),
+            "got: {err}"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn load_cell_records_errors_when_cells_disabled_but_requested() {
+        let dir = std::path::Path::new("/tmp/opencode/io_test_disabled_cells");
+        let _ = fs::remove_dir_all(dir);
+        fs::create_dir_all(dir).unwrap();
+
+        let mut meta = test_meta();
+        meta.write_binary_cells = false;
+        let args = test_args(dir.to_path_buf());
+        let err = load_cell_records(&args, &meta).unwrap_err();
+        assert!(err.to_string().contains("disabled"), "got: {err}");
 
         let _ = fs::remove_dir_all(dir);
     }

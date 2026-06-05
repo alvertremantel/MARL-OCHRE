@@ -21,6 +21,10 @@ pub const GRID_X: usize = 128;
 pub const GRID_Y: usize = 128;
 pub const GRID_Z: usize = 64;
 
+const _: () = assert!(GRID_X <= i16::MAX as usize);
+const _: () = assert!(GRID_Y <= i16::MAX as usize);
+const _: () = assert!(GRID_Z <= i16::MAX as usize);
+
 // Species counts
 pub const S_EXT: usize = 12; // external chemical species
 pub const M_INT: usize = 16; // internal chemical species

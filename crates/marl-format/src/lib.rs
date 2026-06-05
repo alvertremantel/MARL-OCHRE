@@ -14,7 +14,7 @@
 //! # Types
 //!
 //! - [`RunMeta`]: serializable metadata written to `run_meta.json`
-//! - [`ViewerCellRecord`]: packed 25-byte cell record for binary cell dumps
+//! - [`ViewerCellRecord`]: packed 25-byte viewer record for binary cell dumps
 //! - [`FormatError`]: validation error type
 
 // ---------------------------------------------------------------------------
@@ -261,10 +261,23 @@ impl RunMeta {
         }
         validate_snapshot_pattern("field_file_pattern", &self.field_file_pattern)?;
         validate_snapshot_pattern("cell_file_pattern", &self.cell_file_pattern)?;
-        if let Some(expected_len) =
-            field_byte_len(self.grid_x, self.grid_y, self.grid_z, self.s_ext)
-            && self.field_byte_len != expected_len
-        {
+        validate_compression_pattern(
+            "field_file_pattern",
+            &self.field_file_pattern,
+            &self.binary_compression,
+        )?;
+        validate_compression_pattern(
+            "cell_file_pattern",
+            &self.cell_file_pattern,
+            &self.binary_compression,
+        )?;
+        let expected_len = field_byte_len(self.grid_x, self.grid_y, self.grid_z, self.s_ext)
+            .ok_or_else(|| {
+                FormatError::new(
+                    "field dimensions must be non-zero and field_byte_len must not overflow",
+                )
+            })?;
+        if self.field_byte_len != expected_len {
             return Err(FormatError::new(format!(
                 "field_byte_len mismatch: expected {}, got {}",
                 expected_len, self.field_byte_len
@@ -283,7 +296,39 @@ fn validate_snapshot_pattern(name: &str, pattern: &str) -> Result<(), FormatErro
             "{name} must contain exactly one <T> tick placeholder"
         )));
     }
+    for component in std::path::Path::new(pattern).components() {
+        match component {
+            std::path::Component::Prefix(_) | std::path::Component::RootDir => {
+                return Err(FormatError::new(format!(
+                    "{name} must be relative to output_dir"
+                )));
+            }
+            std::path::Component::ParentDir => {
+                return Err(FormatError::new(format!(
+                    "{name} must not contain parent directory components"
+                )));
+            }
+            std::path::Component::CurDir | std::path::Component::Normal(_) => {}
+        }
+    }
     Ok(())
+}
+
+fn validate_compression_pattern(
+    name: &str,
+    pattern: &str,
+    compression: &str,
+) -> Result<(), FormatError> {
+    let has_zst_suffix = pattern.ends_with(".zst");
+    match compression {
+        BINARY_COMPRESSION_ZSTD if !has_zst_suffix => Err(FormatError::new(format!(
+            "{name} must end with .zst when binary_compression is {BINARY_COMPRESSION_ZSTD}"
+        ))),
+        BINARY_COMPRESSION_NONE if has_zst_suffix => Err(FormatError::new(format!(
+            "{name} must not end with .zst when binary_compression is {BINARY_COMPRESSION_NONE}"
+        ))),
+        _ => Ok(()),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -337,10 +382,11 @@ pub fn ruleset_layer_record_stride(
 // Packed viewer cell record
 // ---------------------------------------------------------------------------
 
-/// Packed 25-byte cell record written to `tick_<T>.cells.bin`.
+/// Packed 25-byte viewer cell record written to `tick_<T>.cells.bin`.
 ///
 /// Each record contains position (3 × f32), lineage_id (u64), starter_type (u8),
-/// and energy (f32) in little-endian byte order.
+/// and energy (f32) in little-endian byte order. It is not a full cell-state
+/// checkpoint.
 ///
 /// # Layout
 ///
@@ -450,6 +496,18 @@ mod tests {
     }
 
     #[test]
+    fn test_run_meta_validate_rejects_invalid_dimensions() {
+        let meta = RunMeta::new(0, 128, 64, 12, 8, true, true);
+        let err = meta.validate().unwrap_err();
+        assert!(err.message.contains("dimensions"), "got: {err}");
+
+        let mut meta = RunMeta::new(u32::MAX, u32::MAX, u32::MAX, u32::MAX, 8, true, true);
+        meta.field_byte_len = u64::MAX;
+        let err = meta.validate().unwrap_err();
+        assert!(err.message.contains("overflow"), "got: {err}");
+    }
+
+    #[test]
     fn test_run_meta_validate_bad_compression() {
         let mut meta = RunMeta::new(128, 128, 64, 12, 8, true, true);
         meta.binary_compression = "brotli".to_string();
@@ -473,6 +531,46 @@ mod tests {
         meta.field_file_pattern = "tick_<T>_<T>.field.bin".to_string();
         let err = meta.validate().unwrap_err();
         assert!(err.message.contains("exactly one <T>"));
+    }
+
+    #[test]
+    fn test_run_meta_validate_rejects_escaping_snapshot_patterns() {
+        let mut meta = RunMeta::new(128, 128, 64, 12, 8, true, true);
+        meta.field_file_pattern = "/tmp/tick_<T>.field.bin".to_string();
+        let err = meta.validate().unwrap_err();
+        assert!(err.message.contains("relative to output_dir"), "got: {err}");
+
+        let mut meta = RunMeta::new(128, 128, 64, 12, 8, true, true);
+        meta.cell_file_pattern = "../tick_<T>.cells.bin".to_string();
+        let err = meta.validate().unwrap_err();
+        assert!(err.message.contains("parent directory"), "got: {err}");
+
+        let mut meta = RunMeta::new(128, 128, 64, 12, 8, true, true);
+        meta.cell_file_pattern = "cells/../tick_<T>.cells.bin".to_string();
+        let err = meta.validate().unwrap_err();
+        assert!(err.message.contains("parent directory"), "got: {err}");
+    }
+
+    #[test]
+    fn test_run_meta_validate_compression_matches_patterns() {
+        let mut meta = RunMeta::new(128, 128, 64, 12, 8, true, true);
+        meta.binary_compression = BINARY_COMPRESSION_ZSTD.to_string();
+        meta.field_file_pattern = "tick_<T>.field.bin.zst".to_string();
+        meta.cell_file_pattern = "tick_<T>.cells.bin.zst".to_string();
+        assert!(meta.validate().is_ok());
+
+        let mut meta = RunMeta::new(128, 128, 64, 12, 8, true, true);
+        meta.binary_compression = BINARY_COMPRESSION_ZSTD.to_string();
+        meta.field_file_pattern = "tick_<T>.field.bin.zst".to_string();
+        let err = meta.validate().unwrap_err();
+        assert!(err.message.contains("cell_file_pattern"), "got: {err}");
+        assert!(err.message.contains(".zst"), "got: {err}");
+
+        let mut meta = RunMeta::new(128, 128, 64, 12, 8, true, true);
+        meta.field_file_pattern = "tick_<T>.field.bin.zst".to_string();
+        let err = meta.validate().unwrap_err();
+        assert!(err.message.contains("field_file_pattern"), "got: {err}");
+        assert!(err.message.contains("must not end with .zst"), "got: {err}");
     }
 
     #[test]

@@ -78,7 +78,9 @@ def read_maybe_compressed(path: Path) -> bytes:
     return path.read_bytes()
 
 
-def validate_header(payload: bytes) -> tuple[int, int, int]:
+def validate_header(
+    payload: bytes, allow_unsupported_version: bool
+) -> tuple[int, int, int]:
     """Parse and validate header. Returns (flags, dict_count, cell_count)."""
     if len(payload) < HEADER_SIZE:
         sys.exit(
@@ -98,7 +100,10 @@ def validate_header(payload: bytes) -> tuple[int, int, int]:
 
     # Validate version
     if version != FORMAT_VERSION:
-        print(f"WARNING: version mismatch: got {version}, expected {FORMAT_VERSION}")
+        message = f"version mismatch: got {version}, expected {FORMAT_VERSION}"
+        if not allow_unsupported_version:
+            sys.exit(f"Error: {message}")
+        print(f"WARNING: {message}")
 
     # Validate ruleset byte size
     if ruleset_byte_size != CANONICAL_RULESET_SIZE:
@@ -310,6 +315,11 @@ Examples:
         action="store_true",
         help="Show complete dict usage histogram (not just top 10)",
     )
+    parser.add_argument(
+        "--allow-unsupported-version",
+        action="store_true",
+        help="Warn and continue when the file format version is unsupported",
+    )
     args = parser.parse_args()
 
     path = args.file
@@ -321,7 +331,9 @@ Examples:
     print(f"  Raw size: {len(payload):,} bytes")
 
     # --- Header ---
-    flags, dict_count, cell_count = validate_header(payload)
+    flags, dict_count, cell_count = validate_header(
+        payload, args.allow_unsupported_version
+    )
     ruleset_size = struct.unpack_from("<I", payload, 20)[0]
 
     print()

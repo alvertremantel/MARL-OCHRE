@@ -17,7 +17,7 @@ The project has a clean split between environment, cells, orchestration, and out
 - `crates/marl-engine/src/main.rs` ties everything together: seeding, tick order, births, deaths, and output cadence.
 - `crates/marl-output/src/data.rs` and `crates/marl-output/src/snapshot.rs` convert state into files for later analysis.
 - `crates/marl-engine/src/hgt.rs` contains a horizontal gene transfer primitive that is currently not invoked.
-- `crates/marl-output/src/binary_dump.rs` writes raw binary field/cell snapshots and `run_meta.json` for the viewer.
+- `crates/marl-output/src/binary_dump.rs` writes raw binary field arrays, compact viewer cell records, and `run_meta.json`.
 - `crates/marl-format/src/lib.rs` owns the shared binary schema (`RunMeta`, `ViewerCellRecord`, field layout constants).
 
 Conceptually, the simulation loop is:
@@ -208,13 +208,13 @@ The output side of the project is already quite useful.
 
 ### Binary Viewer Outputs
 
-`crates/marl-output/src/binary_dump.rs` writes the high-fidelity binary outputs consumed by the standalone viewer:
+`crates/marl-output/src/binary_dump.rs` writes binary outputs consumed by the standalone viewer and analysis scripts. These files are data products, not restartable simulation checkpoints:
 
 - `run_meta.json` — grid dimensions, species counts, field byte length, and cell record stride
-- `tick_<T>.field.bin.zst` — losslessly compressed little-endian `f32` field data in `[z][y][x][species]` order by default (`.bin` if compression is disabled)
-- `tick_<T>.cells.bin.zst` — losslessly compressed packed 25-byte `ViewerCellRecord` array by default (`.bin` if compression is disabled)
-- `tick_<T>.ruleset_layers.bin.zst` — optional per-z-layer averages of continuous ruleset parameters, written on an independent cadence
-- `tick_<T>.rulesets.bin.zst` — optional per-cell deduplicated full ruleset dump with dictionary (dict section + per-cell references), written on an independent cadence
+- `tick_<T>.field.bin.zst` — compressed little-endian `f32` extracellular field data in `[z][y][x][species]` order by default (`.bin` if compression is disabled)
+- `tick_<T>.cells.bin.zst` — compressed packed 25-byte `ViewerCellRecord` array by default (`.bin` if compression is disabled); records contain position, lineage ID, starter type, and energy only
+- `tick_<T>.ruleset_layers.bin.zst` — optional per-z-layer slot-wise averages of continuous ruleset parameters, written on an independent cadence; topology/species IDs are omitted, so averaged slots can mix different reaction or transport semantics
+- `tick_<T>.rulesets.bin.zst` — optional per-cell deduplicated ruleset genotype dump with dictionary (dict section + per-cell position references), written on an independent cadence; it omits lineage, energy, and internal pools unless interpreted alongside the cell dump
 
 The shared schema for these files lives in `crates/marl-format/` so both engine and viewer can reference the same constants without code duplication.
 
@@ -253,7 +253,7 @@ The project is in a good prototype state. It is not a toy, but it is also not ye
 - light attenuation field
 - cell tick loop with transport, reaction, secretion, death, and division prep
 - mutation and lineage generation
-- binary viewer snapshots (field, cells, metadata) and an interactive `wgpu`/`egui` 3D viewer
+- binary viewer records (field, compact cells, metadata) and an interactive `wgpu`/`egui` 3D viewer
 - run summaries and useful raw outputs
 - a coherent seeded ecological scenario
 
