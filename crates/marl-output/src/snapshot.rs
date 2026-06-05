@@ -112,13 +112,13 @@ fn write_ppm(path: &Path, width: usize, height: usize, pixels: &[[u8; 3]]) -> st
 }
 
 // ---------------------------------------------------------------------------
-// XZ cross-section (vertical slice through the column at y = GRID_Y/2)
+// XZ cross-section (vertical slice through the column midpoint)
 // ---------------------------------------------------------------------------
 
 /// Write a PPM image of a chemical species concentration in the XZ plane.
 ///
 /// Physical interpretation: this is a vertical cross-section through the
-/// middle of the domain (at y = GRID_Y / 2). The X axis runs horizontally
+/// middle of the domain (at y = grid.y / 2). The X axis runs horizontally
 /// (left to right), and the Z axis runs vertically with z=0 at the **top**
 /// of the image — matching the physical layout where light and nutrients
 /// enter from the surface (z=0) and depth increases downward.
@@ -131,14 +131,15 @@ pub fn write_xz_cross_section(
     tick: u64,
     out_dir: &str,
 ) -> std::io::Result<()> {
-    let y_mid = GRID_Y / 2;
-    let width = GRID_X;
-    let height = GRID_Z;
+    let grid = field.grid();
+    let y_mid = grid.y / 2;
+    let width = grid.x;
+    let height = grid.z;
 
     // First pass: find the maximum concentration in this slice for auto-scaling.
     let mut max_val: f32 = 0.0;
-    for z in 0..GRID_Z {
-        for x in 0..GRID_X {
+    for z in 0..grid.z {
+        for x in 0..grid.x {
             let v = field.get(x, y_mid, z, species);
             if v > max_val {
                 max_val = v;
@@ -148,8 +149,8 @@ pub fn write_xz_cross_section(
 
     // Second pass: map concentrations to colors.
     let mut pixels = Vec::with_capacity(width * height);
-    for z in 0..GRID_Z {
-        for x in 0..GRID_X {
+    for z in 0..grid.z {
+        for x in 0..grid.x {
             let v = field.get(x, y_mid, z, species);
             pixels.push(value_to_color(v, max_val));
         }
@@ -179,13 +180,14 @@ pub fn write_xy_cross_section(
     tick: u64,
     out_dir: &str,
 ) -> std::io::Result<()> {
-    let width = GRID_X;
-    let height = GRID_Y;
+    let grid = field.grid();
+    let width = grid.x;
+    let height = grid.y;
 
     // First pass: find max for auto-scaling.
     let mut max_val: f32 = 0.0;
-    for y in 0..GRID_Y {
-        for x in 0..GRID_X {
+    for y in 0..grid.y {
+        for x in 0..grid.x {
             let v = field.get(x, y, z, species);
             if v > max_val {
                 max_val = v;
@@ -195,8 +197,8 @@ pub fn write_xy_cross_section(
 
     // Second pass: render.
     let mut pixels = Vec::with_capacity(width * height);
-    for y in 0..GRID_Y {
-        for x in 0..GRID_X {
+    for y in 0..grid.y {
+        for x in 0..grid.x {
             let v = field.get(x, y, z, species);
             pixels.push(value_to_color(v, max_val));
         }
@@ -213,7 +215,7 @@ pub fn write_xy_cross_section(
 // ---------------------------------------------------------------------------
 
 /// Write a grayscale PPM image showing cell density in the XZ plane at
-/// y = GRID_Y / 2.
+/// y = grid.y / 2.
 ///
 /// Currently each voxel holds at most one cell, so this is effectively a
 /// binary image (black = empty, white = occupied). However, the code counts
@@ -223,13 +225,14 @@ pub fn write_xy_cross_section(
 ///
 /// Grayscale is achieved by setting R = G = B to the same intensity value.
 pub fn write_cell_density_xz(
+    grid: GridDims,
     cells: &HashMap<[u16; 3], usize>,
     tick: u64,
     out_dir: &str,
 ) -> std::io::Result<()> {
-    let y_mid = GRID_Y / 2;
-    let width = GRID_X;
-    let height = GRID_Z;
+    let y_mid = grid.y / 2;
+    let width = grid.x;
+    let height = grid.z;
 
     // Count cells at each (x, z) position in this y-slice.
     let mut counts = vec![0u32; width * height];
@@ -237,7 +240,7 @@ pub fn write_cell_density_xz(
         if pos[1] as usize == y_mid {
             let x = pos[0] as usize;
             let z = pos[2] as usize;
-            if x < GRID_X && z < GRID_Z {
+            if x < grid.x && z < grid.z {
                 counts[z * width + x] += 1;
             }
         }
@@ -268,7 +271,7 @@ pub fn write_cell_density_xz(
 /// Write a full set of diagnostic images for the current simulation state.
 ///
 /// This produces:
-///   - XZ cross-sections (vertical slices at y=GRID_Y/2) for the configured
+///   - XZ cross-sections (vertical slices at y=grid.y/2) for the configured
 ///     species (default: oxidant (1), reductant (2), carbon (3), organic (4)).
 ///     These show the vertical gradient structure that emerges from
 ///     top-sourced oxidant/carbon vs. bottom-sourced reductant.
@@ -295,6 +298,7 @@ pub fn write_all_snapshots(
     _sim: &SimulationConfig,
 ) -> std::io::Result<()> {
     let out_dir = &out.output_dir;
+    let grid = field.grid();
     // Ensure the output directory exists.
     fs::create_dir_all(out_dir)?;
 
@@ -307,18 +311,18 @@ pub fn write_all_snapshots(
 
     // --- XY cross-sections at configured depths ---
     for &frac in &out.xy_slice_depths_frac {
-        let z = (frac.clamp(0.0, 1.0) * (GRID_Z - 1) as f32).round() as usize;
+        let z = (frac.clamp(0.0, 1.0) * (grid.z - 1) as f32).round() as usize;
         write_xy_cross_section(field, 3, z, tick, out_dir)?;
     }
 
     // --- Cell density heatmap ---
     if out.write_density_map {
-        write_cell_density_xz(cells, tick, out_dir)?;
+        write_cell_density_xz(grid, cells, tick, out_dir)?;
     }
 
     // --- Ancestry map (red=photo, green=chemo, blue=anaerobe) ---
     if out.write_ancestry_map {
-        write_ancestry_xz(cell_vec, cells, tick, out_dir)?;
+        write_ancestry_xz(grid, cell_vec, cells, tick, out_dir)?;
     }
 
     Ok(())
@@ -338,19 +342,20 @@ pub fn write_all_snapshots(
 /// metabolism colonized each depth zone and whether the middle was
 /// invaded from above or below.
 pub fn write_ancestry_xz(
+    grid: GridDims,
     cells: &[marl_cell::cell::CellState],
     cell_map: &HashMap<[u16; 3], usize>,
     tick: u64,
     out_dir: &str,
 ) -> std::io::Result<()> {
-    let y_mid = GRID_Y / 2;
-    let width = GRID_X;
-    let height = GRID_Z;
+    let y_mid = grid.y / 2;
+    let width = grid.x;
+    let height = grid.z;
 
     let mut pixels = vec![[0u8; 3]; width * height];
 
-    for z in 0..GRID_Z {
-        for x in 0..GRID_X {
+    for z in 0..grid.z {
+        for x in 0..grid.x {
             let pos = [x as u16, y_mid as u16, z as u16];
             if let Some(&idx) = cell_map.get(&pos) {
                 let cell = &cells[idx];

@@ -40,13 +40,19 @@ fn viewer_cell_from(cell: &CellState) -> ViewerCellRecord {
     }
 }
 
-fn validate_cell_position(cell: &CellState, index: usize, context: &str) -> std::io::Result<()> {
+fn validate_cell_position(
+    grid: GridDims,
+    cell: &CellState,
+    index: usize,
+    context: &str,
+) -> std::io::Result<()> {
     let [x, y, z] = cell.pos;
-    if x as usize >= GRID_X || y as usize >= GRID_Y || z as usize >= GRID_Z {
+    if x as usize >= grid.x || y as usize >= grid.y || z as usize >= grid.z {
         return Err(Error::new(
             ErrorKind::InvalidInput,
             format!(
-                "{context} cell {index} position ({x},{y},{z}) out of bounds ({GRID_X},{GRID_Y},{GRID_Z})"
+                "{context} cell {index} position ({x},{y},{z}) out of bounds ({},{},{})",
+                grid.x, grid.y, grid.z
             ),
         ));
     }
@@ -54,11 +60,12 @@ fn validate_cell_position(cell: &CellState, index: usize, context: &str) -> std:
 }
 
 fn validate_cell_for_viewer_dump(
+    grid: GridDims,
     cell: &CellState,
     index: usize,
     context: &str,
 ) -> std::io::Result<()> {
-    validate_cell_position(cell, index, context)?;
+    validate_cell_position(grid, cell, index, context)?;
     if !cell.internal[0].is_finite() {
         return Err(Error::new(
             ErrorKind::InvalidInput,
@@ -225,10 +232,15 @@ pub fn write_field_dump(field: &Field, tick: u64, out: &OutputConfig) -> std::io
     write_binary_payload(&path, as_bytes(&field.data), out)
 }
 
-pub fn write_cell_dump(cells: &[CellState], tick: u64, out: &OutputConfig) -> std::io::Result<()> {
+pub fn write_cell_dump(
+    grid: GridDims,
+    cells: &[CellState],
+    tick: u64,
+    out: &OutputConfig,
+) -> std::io::Result<()> {
     fs::create_dir_all(&out.output_dir)?;
     for (index, cell) in cells.iter().enumerate() {
-        validate_cell_for_viewer_dump(cell, index, "cell dump")?;
+        validate_cell_for_viewer_dump(grid, cell, index, "cell dump")?;
     }
     let viewer_cells: Vec<ViewerCellRecord> = cells.iter().map(viewer_cell_from).collect();
     let path = binary_file_path(out, tick, "cells");
@@ -268,6 +280,7 @@ fn append_ruleset_layer_values(buf: &mut [f64; RULESET_LAYER_AVG_F32_COUNT], rul
 }
 
 pub fn write_ruleset_layer_dump(
+    grid: GridDims,
     cells: &[CellState],
     tick: u64,
     out: &OutputConfig,
@@ -275,15 +288,16 @@ pub fn write_ruleset_layer_dump(
     fs::create_dir_all(&out.output_dir)?;
 
     for (index, cell) in cells.iter().enumerate() {
-        validate_cell_position(cell, index, "ruleset layer dump")?;
+        validate_cell_position(grid, cell, index, "ruleset layer dump")?;
         validate_ruleset_finite(&cell.ruleset, index, "ruleset layer dump")?;
     }
 
-    let capacity = GRID_Z
+    let capacity = grid
+        .z
         .checked_mul(RULESET_LAYER_RECORD_STRIDE)
         .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "ruleset layer size overflow"))?;
     let mut bytes = Vec::with_capacity(capacity);
-    for z in 0..GRID_Z {
+    for z in 0..grid.z {
         let mut sums = [0.0f64; RULESET_LAYER_AVG_F32_COUNT];
         let mut count: u32 = 0;
 
@@ -400,6 +414,7 @@ fn ruleset_to_canonical_bytes(ruleset: &Ruleset) -> [u8; RULESET_FULL_CANONICAL_
 ///   dict_id: u32 le
 /// ```
 pub fn write_ruleset_full_dump(
+    grid: GridDims,
     cells: &[CellState],
     tick: u64,
     out: &OutputConfig,
@@ -407,7 +422,7 @@ pub fn write_ruleset_full_dump(
     fs::create_dir_all(&out.output_dir)?;
 
     for (index, cell) in cells.iter().enumerate() {
-        validate_cell_position(cell, index, "full ruleset dump")?;
+        validate_cell_position(grid, cell, index, "full ruleset dump")?;
         validate_ruleset_finite(&cell.ruleset, index, "full ruleset dump")?;
     }
 
@@ -510,15 +525,16 @@ struct RunMetaFile {
     ruleset_full_payload_layout: Option<&'static str>,
 }
 
-pub fn write_run_meta(out: &OutputConfig) -> std::io::Result<()> {
+pub fn write_run_meta(grid: GridDims, out: &OutputConfig) -> std::io::Result<()> {
     fs::create_dir_all(&out.output_dir)?;
     let path = Path::new(&out.output_dir).join("run_meta.json");
-    let field_count = GRID_X
-        .checked_mul(GRID_Y)
-        .and_then(|v| v.checked_mul(GRID_Z))
+    let field_count = grid
+        .x
+        .checked_mul(grid.y)
+        .and_then(|v| v.checked_mul(grid.z))
         .and_then(|v| v.checked_mul(S_EXT))
         .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "field count overflow"))?;
-    let field_byte_len = field_byte_len(GRID_X as u32, GRID_Y as u32, GRID_Z as u32, S_EXT as u32)
+    let field_byte_len = field_byte_len(grid.x as u32, grid.y as u32, grid.z as u32, S_EXT as u32)
         .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "field byte length overflow"))?;
     let ruleset_stride = ruleset_layer_record_stride(
         S_RECEPTORS as u32,
@@ -532,9 +548,9 @@ pub fn write_run_meta(out: &OutputConfig) -> std::io::Result<()> {
     let writes_full = mode.writes_full_dump();
 
     let mut core = RunMeta::new(
-        GRID_X as u32,
-        GRID_Y as u32,
-        GRID_Z as u32,
+        grid.x as u32,
+        grid.y as u32,
+        grid.z as u32,
         S_EXT as u32,
         M_INT as u32,
         out.write_binary_field,
@@ -722,7 +738,7 @@ mod tests {
         out.ruleset_output_mode = RulesetOutputMode::LayerAverages;
         out.ruleset_interval = 777;
 
-        write_run_meta(&out).unwrap();
+        write_run_meta(GridDims::default(), &out).unwrap();
 
         let meta_bytes = fs::read(Path::new(&out_dir).join("run_meta.json")).unwrap();
         let meta_json: serde_json::Value = serde_json::from_slice(&meta_bytes).unwrap();
@@ -745,6 +761,31 @@ mod tests {
     }
 
     #[test]
+    fn write_run_meta_uses_runtime_grid_dimensions() {
+        let out_dir = test_output_dir("marl_output_meta_runtime_grid_test");
+        let mut out = OutputConfig::default();
+        out.output_dir = out_dir.clone();
+        let grid = GridDims {
+            x: 64,
+            y: 64,
+            z: 32,
+        };
+
+        write_run_meta(grid, &out).unwrap();
+
+        let meta_bytes = fs::read(Path::new(&out_dir).join("run_meta.json")).unwrap();
+        let meta_json: serde_json::Value = serde_json::from_slice(&meta_bytes).unwrap();
+        let meta: RunMeta = serde_json::from_slice(&meta_bytes).unwrap();
+
+        assert_eq!(meta.grid_x, 64);
+        assert_eq!(meta.grid_y, 64);
+        assert_eq!(meta.grid_z, 32);
+        assert_eq!(meta.field_byte_len, 64 * 64 * 32 * S_EXT as u64 * 4);
+        assert_eq!(meta_json["field_count"], 64 * 64 * 32 * S_EXT);
+        assert!(meta.validate().is_ok());
+    }
+
+    #[test]
     fn write_cell_dump_compresses_when_requested() {
         let out_dir = test_output_dir("marl_output_cells_zstd_test");
         let mut out = OutputConfig::default();
@@ -753,7 +794,7 @@ mod tests {
         out.binary_compression_level = 3;
 
         let cells = vec![test_cell([1, 2, 3], 42, 4.5)];
-        write_cell_dump(&cells, 9, &out).unwrap();
+        write_cell_dump(GridDims::default(), &cells, 9, &out).unwrap();
 
         let path = Path::new(&out_dir).join("tick_9.cells.bin.zst");
         assert!(path.exists());
@@ -768,13 +809,13 @@ mod tests {
         out.output_dir = out_dir.clone();
 
         let out_of_bounds = vec![test_cell([GRID_X as u16, 0, 0], 42, 4.5)];
-        let err = write_cell_dump(&out_of_bounds, 9, &out).unwrap_err();
+        let err = write_cell_dump(GridDims::default(), &out_of_bounds, 9, &out).unwrap_err();
         assert_eq!(err.kind(), ErrorKind::InvalidInput);
         assert!(err.to_string().contains("out of bounds"));
 
         let mut nonfinite = test_cell([1, 2, 3], 42, 4.5);
         nonfinite.internal[0] = f32::NAN;
-        let err = write_cell_dump(&[nonfinite], 10, &out).unwrap_err();
+        let err = write_cell_dump(GridDims::default(), &[nonfinite], 10, &out).unwrap_err();
         assert_eq!(err.kind(), ErrorKind::InvalidInput);
         assert!(err.to_string().contains("energy"));
     }
@@ -790,7 +831,7 @@ mod tests {
             test_cell([1, 1, 0], 2, 3.0),
             test_cell([2, 2, 1], 3, 5.0),
         ];
-        write_ruleset_layer_dump(&cells, 7, &out).unwrap();
+        write_ruleset_layer_dump(GridDims::default(), &cells, 7, &out).unwrap();
 
         let path = Path::new(&out_dir).join("tick_7.ruleset_layers.bin.zst");
         let bytes = read_maybe_zstd(&path);
@@ -821,19 +862,22 @@ mod tests {
         out.output_dir = out_dir.clone();
 
         let out_of_bounds = vec![test_cell([0, 0, GRID_Z as u16], 1, 1.0)];
-        let err = write_ruleset_layer_dump(&out_of_bounds, 7, &out).unwrap_err();
+        let err =
+            write_ruleset_layer_dump(GridDims::default(), &out_of_bounds, 7, &out).unwrap_err();
         assert_eq!(err.kind(), ErrorKind::InvalidInput);
         assert!(err.to_string().contains("out of bounds"));
-        let err = write_ruleset_full_dump(&out_of_bounds, 7, &out).unwrap_err();
+        let err =
+            write_ruleset_full_dump(GridDims::default(), &out_of_bounds, 7, &out).unwrap_err();
         assert_eq!(err.kind(), ErrorKind::InvalidInput);
         assert!(err.to_string().contains("out of bounds"));
 
         let mut nonfinite = test_cell([0, 0, 0], 1, 1.0);
         nonfinite.ruleset.receptors[0].k_half = f32::INFINITY;
-        let err = write_ruleset_layer_dump(&[nonfinite.clone()], 8, &out).unwrap_err();
+        let err = write_ruleset_layer_dump(GridDims::default(), &[nonfinite.clone()], 8, &out)
+            .unwrap_err();
         assert_eq!(err.kind(), ErrorKind::InvalidInput);
         assert!(err.to_string().contains("not finite"));
-        let err = write_ruleset_full_dump(&[nonfinite], 8, &out).unwrap_err();
+        let err = write_ruleset_full_dump(GridDims::default(), &[nonfinite], 8, &out).unwrap_err();
         assert_eq!(err.kind(), ErrorKind::InvalidInput);
         assert!(err.to_string().contains("not finite"));
     }
@@ -883,7 +927,7 @@ mod tests {
             test_cell([3, 0, 0], 4, 3.0), // B (same ruleset)
             test_cell([4, 0, 0], 5, 5.0), // C (unique)
         ];
-        write_ruleset_full_dump(&cells, 10, &out).unwrap();
+        write_ruleset_full_dump(GridDims::default(), &cells, 10, &out).unwrap();
 
         let path = Path::new(&out_dir).join("tick_10.rulesets.bin.zst");
         let bytes = read_maybe_zstd(&path);
@@ -944,7 +988,7 @@ mod tests {
         out.output_dir = out_dir.clone();
 
         let cells: Vec<CellState> = Vec::new();
-        write_ruleset_full_dump(&cells, 11, &out).unwrap();
+        write_ruleset_full_dump(GridDims::default(), &cells, 11, &out).unwrap();
 
         let path = Path::new(&out_dir).join("tick_11.rulesets.bin.zst");
         let bytes = read_maybe_zstd(&path);
@@ -965,7 +1009,7 @@ mod tests {
         out.ruleset_output_mode = RulesetOutputMode::Full;
         out.ruleset_interval = 500;
 
-        write_run_meta(&out).unwrap();
+        write_run_meta(GridDims::default(), &out).unwrap();
 
         let meta_bytes = fs::read(Path::new(&out_dir).join("run_meta.json")).unwrap();
         let meta_json: serde_json::Value = serde_json::from_slice(&meta_bytes).unwrap();
@@ -993,7 +1037,7 @@ mod tests {
         out.output_dir = out_dir.clone();
         out.ruleset_output_mode = RulesetOutputMode::Off;
 
-        write_run_meta(&out).unwrap();
+        write_run_meta(GridDims::default(), &out).unwrap();
 
         let meta_bytes = fs::read(Path::new(&out_dir).join("run_meta.json")).unwrap();
         let meta_json: serde_json::Value = serde_json::from_slice(&meta_bytes).unwrap();
@@ -1012,7 +1056,7 @@ mod tests {
         out.binary_compression_level = 3;
 
         let cells = vec![test_cell([0, 0, 0], 1, 1.0)];
-        write_ruleset_full_dump(&cells, 12, &out).unwrap();
+        write_ruleset_full_dump(GridDims::default(), &cells, 12, &out).unwrap();
 
         let path = Path::new(&out_dir).join("tick_12.rulesets.bin.zst");
         assert!(path.exists());

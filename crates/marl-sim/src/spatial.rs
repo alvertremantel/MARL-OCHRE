@@ -1,14 +1,14 @@
 use marl_config::stoich::{
     StoichEventKind, StoichRecord, StoichReservoir, StoichStage, StoichTickLedger, external_delta,
 };
-use marl_config::{GRID_X, GRID_Y, GRID_Z, S_EXT, SimulationConfig};
+use marl_config::{GridDims, S_EXT, SimulationConfig};
 use marl_field::field::Field;
 use rand::Rng;
 use std::collections::{HashMap, HashSet};
 
 /// The 6 face-neighbor offsets in 3D (±x, ±y, ±z).
 /// Shared by all neighbor-scanning functions.
-const FACE_OFFSETS: [(i16, i16, i16); 6] = [
+const FACE_OFFSETS: [(i32, i32, i32); 6] = [
     (1, 0, 0),
     (-1, 0, 0),
     (0, 1, 0),
@@ -18,6 +18,7 @@ const FACE_OFFSETS: [(i16, i16, i16); 6] = [
 ];
 
 fn collect_empty_neighbors(
+    grid: GridDims,
     pos: [u16; 3],
     cell_map: &HashMap<[u16; 3], usize>,
     reserved: Option<&HashSet<[u16; 3]>>,
@@ -25,15 +26,15 @@ fn collect_empty_neighbors(
     let mut neighbors = [[0u16; 3]; 6];
     let mut count = 0;
     for &(dx, dy, dz) in &FACE_OFFSETS {
-        let nx = pos[0] as i16 + dx;
-        let ny = pos[1] as i16 + dy;
-        let nz = pos[2] as i16 + dz;
+        let nx = pos[0] as i32 + dx;
+        let ny = pos[1] as i32 + dy;
+        let nz = pos[2] as i32 + dz;
         if nx >= 0
-            && nx < GRID_X as i16
+            && nx < grid.x as i32
             && ny >= 0
-            && ny < GRID_Y as i16
+            && ny < grid.y as i32
             && nz >= 0
-            && nz < GRID_Z as i16
+            && nz < grid.z as i32
         {
             let p = [nx as u16, ny as u16, nz as u16];
             if !cell_map.contains_key(&p) && reserved.is_none_or(|r| !r.contains(&p)) {
@@ -46,8 +47,12 @@ fn collect_empty_neighbors(
 }
 
 /// Collect the positions of all in-bounds, empty face-neighbors of a voxel.
-pub fn empty_neighbors(pos: [u16; 3], cell_map: &HashMap<[u16; 3], usize>) -> Vec<[u16; 3]> {
-    let (neighbors, count) = collect_empty_neighbors(pos, cell_map, None);
+pub fn empty_neighbors(
+    grid: GridDims,
+    pos: [u16; 3],
+    cell_map: &HashMap<[u16; 3], usize>,
+) -> Vec<[u16; 3]> {
+    let (neighbors, count) = collect_empty_neighbors(grid, pos, cell_map, None);
     neighbors[..count].to_vec()
 }
 
@@ -67,7 +72,7 @@ pub fn read_neighbor_environment(
     field: &Field,
     cell_map: &HashMap<[u16; 3], usize>,
 ) -> [f32; S_EXT] {
-    let (neighbors, count) = collect_empty_neighbors(pos, cell_map, None);
+    let (neighbors, count) = collect_empty_neighbors(field.grid(), pos, cell_map, None);
     if count == 0 {
         return [0.0; S_EXT];
     }
@@ -112,7 +117,7 @@ pub fn apply_deltas_to_neighbors_with_stoich(
     actor_id: u64,
 ) -> [f32; S_EXT] {
     let mut accepted = [0.0f32; S_EXT];
-    let (neighbors, count) = collect_empty_neighbors(pos, cell_map, None);
+    let (neighbors, count) = collect_empty_neighbors(field.grid(), pos, cell_map, None);
     if count == 0 {
         for (species, delta) in deltas.iter().enumerate() {
             if *delta != 0.0
@@ -212,35 +217,37 @@ pub fn apply_deltas_to_neighbors_with_stoich(
 /// Daughters bud off and drift — they don't accrete like plant tissue.
 /// Falls back to adjacent placement if no long-range positions are available.
 pub fn find_empty_neighbor(
+    grid: GridDims,
     pos: [u16; 3],
     occupied: &HashMap<[u16; 3], usize>,
     rng: &mut impl Rng,
     sim: &SimulationConfig,
 ) -> Option<[u16; 3]> {
-    find_empty_neighbor_avoiding(pos, occupied, None, rng, sim)
+    find_empty_neighbor_avoiding(grid, pos, occupied, None, rng, sim)
 }
 
 pub fn find_empty_neighbor_avoiding(
+    grid: GridDims,
     pos: [u16; 3],
     occupied: &HashMap<[u16; 3], usize>,
     reserved: Option<&HashSet<[u16; 3]>>,
     rng: &mut impl Rng,
     sim: &SimulationConfig,
 ) -> Option<[u16; 3]> {
-    let dist = sim.division_neighbor_distance as i16;
+    let dist = sim.division_neighbor_distance as i32;
     // Try distance-first (gap between parent and daughter)
     let mut candidates = [[0u16; 3]; 6];
     let mut count = 0;
     for &(dx, dy, dz) in &FACE_OFFSETS {
-        let nx = pos[0] as i16 + dx * dist;
-        let ny = pos[1] as i16 + dy * dist;
-        let nz = pos[2] as i16 + dz * dist;
+        let nx = pos[0] as i32 + dx * dist;
+        let ny = pos[1] as i32 + dy * dist;
+        let nz = pos[2] as i32 + dz * dist;
         if nx >= 0
-            && nx < GRID_X as i16
+            && nx < grid.x as i32
             && ny >= 0
-            && ny < GRID_Y as i16
+            && ny < grid.y as i32
             && nz >= 0
-            && nz < GRID_Z as i16
+            && nz < grid.z as i32
         {
             let npos = [nx as u16, ny as u16, nz as u16];
             if !occupied.contains_key(&npos) && reserved.is_none_or(|r| !r.contains(&npos)) {
@@ -255,7 +262,7 @@ pub fn find_empty_neighbor_avoiding(
     }
 
     // Fallback: adjacent placement if surrounded at distance
-    let (adjacent, adjacent_count) = collect_empty_neighbors(pos, occupied, reserved);
+    let (adjacent, adjacent_count) = collect_empty_neighbors(grid, pos, occupied, reserved);
     if adjacent_count == 0 {
         None
     } else {
@@ -265,8 +272,12 @@ pub fn find_empty_neighbor_avoiding(
 }
 
 #[allow(dead_code)] // TODO: used by HGT when re-enabled
-pub fn find_cell_neighbor(pos: [u16; 3], cell_map: &HashMap<[u16; 3], usize>) -> Option<usize> {
-    let offsets: [(i16, i16, i16); 6] = [
+pub fn find_cell_neighbor(
+    grid: GridDims,
+    pos: [u16; 3],
+    cell_map: &HashMap<[u16; 3], usize>,
+) -> Option<usize> {
+    let offsets: [(i32, i32, i32); 6] = [
         (1, 0, 0),
         (-1, 0, 0),
         (0, 1, 0),
@@ -275,15 +286,15 @@ pub fn find_cell_neighbor(pos: [u16; 3], cell_map: &HashMap<[u16; 3], usize>) ->
         (0, 0, -1),
     ];
     for &(dx, dy, dz) in &offsets {
-        let nx = pos[0] as i16 + dx;
-        let ny = pos[1] as i16 + dy;
-        let nz = pos[2] as i16 + dz;
+        let nx = pos[0] as i32 + dx;
+        let ny = pos[1] as i32 + dy;
+        let nz = pos[2] as i32 + dz;
         if nx >= 0
-            && nx < GRID_X as i16
+            && nx < grid.x as i32
             && ny >= 0
-            && ny < GRID_Y as i16
+            && ny < grid.y as i32
             && nz >= 0
-            && nz < GRID_Z as i16
+            && nz < grid.z as i32
         {
             let npos = [nx as u16, ny as u16, nz as u16];
             if let Some(&idx) = cell_map.get(&npos) {
@@ -300,31 +311,33 @@ mod tests {
 
     #[test]
     fn consumption_is_weighted_by_available_neighbor_mass() {
-        let mut field = Field::new();
-        let cell_map = HashMap::from([([10, 10, 10], 0)]);
-        field.set(11, 10, 10, 1, 0.0);
-        field.set(9, 10, 10, 1, 1.0);
+        let grid = GridDims { x: 5, y: 5, z: 5 };
+        let mut field = Field::new(grid);
+        let cell_map = HashMap::from([([2, 2, 2], 0)]);
+        field.set(3, 2, 2, 1, 0.0);
+        field.set(1, 2, 2, 1, 1.0);
 
         let mut deltas = [0.0f32; S_EXT];
         deltas[1] = -0.5;
-        apply_deltas_to_neighbors([10, 10, 10], &mut field, &cell_map, &deltas);
+        apply_deltas_to_neighbors([2, 2, 2], &mut field, &cell_map, &deltas);
 
-        assert_eq!(field.get(11, 10, 10, 1), 0.0);
-        assert!((field.get(9, 10, 10, 1) - 0.5).abs() < 1e-6);
+        assert_eq!(field.get(3, 2, 2, 1), 0.0);
+        assert!((field.get(1, 2, 2, 1) - 0.5).abs() < 1e-6);
     }
 
     #[test]
     fn enclosed_exchange_records_balanced_clamp_loss_without_field_change() {
-        let mut field = Field::new();
-        let center = [10, 10, 10];
+        let grid = GridDims { x: 5, y: 5, z: 5 };
+        let mut field = Field::new(grid);
+        let center = [2, 2, 2];
         let cell_map = HashMap::from([
             (center, 0),
-            ([11, 10, 10], 1),
-            ([9, 10, 10], 2),
-            ([10, 11, 10], 3),
-            ([10, 9, 10], 4),
-            ([10, 10, 11], 5),
-            ([10, 10, 9], 6),
+            ([3, 2, 2], 1),
+            ([1, 2, 2], 2),
+            ([2, 3, 2], 3),
+            ([2, 1, 2], 4),
+            ([2, 2, 3], 5),
+            ([2, 2, 1], 6),
         ]);
         let mut deltas = [0.0f32; S_EXT];
         deltas[4] = 1.25;
@@ -341,7 +354,7 @@ mod tests {
         );
 
         assert_eq!(accepted[4], 0.0);
-        assert_eq!(field.get(11, 10, 10, 4), 0.0);
+        assert_eq!(field.get(3, 2, 2, 4), 0.0);
         assert_eq!(ledger.events.len(), 1);
         let event = &ledger.events[0];
         assert_eq!(event.kind, StoichEventKind::ClampLoss);
@@ -356,8 +369,9 @@ mod tests {
 
     #[test]
     fn empty_neighbor_scan_uses_face_neighbors_only() {
+        let grid = GridDims { x: 4, y: 4, z: 4 };
         let cell_map = HashMap::from([([1, 1, 1], 0), ([2, 1, 1], 1)]);
-        let neighbors = empty_neighbors([1, 1, 1], &cell_map);
+        let neighbors = empty_neighbors(grid, [1, 1, 1], &cell_map);
 
         assert_eq!(neighbors.len(), 5);
         assert!(!neighbors.contains(&[2, 1, 1]));
@@ -366,6 +380,7 @@ mod tests {
 
     #[test]
     fn division_neighbor_search_avoids_reserved_birth_positions() {
+        let grid = GridDims { x: 4, y: 4, z: 4 };
         let sim = SimulationConfig {
             division_neighbor_distance: 1,
             ..SimulationConfig::default()
@@ -381,9 +396,39 @@ mod tests {
         let reserved = HashSet::from([[2, 1, 1]]);
         let mut rng = rand::rng();
 
-        let found =
-            find_empty_neighbor_avoiding([1, 1, 1], &cell_map, Some(&reserved), &mut rng, &sim);
+        let found = find_empty_neighbor_avoiding(
+            grid,
+            [1, 1, 1],
+            &cell_map,
+            Some(&reserved),
+            &mut rng,
+            &sim,
+        );
 
         assert_eq!(found, None);
+    }
+
+    #[test]
+    fn large_grid_neighbor_math_does_not_overflow_near_boundary() {
+        let grid = GridDims {
+            x: i16::MAX as usize,
+            y: 1,
+            z: 1,
+        };
+        let cell_map = HashMap::new();
+        let pos = [(i16::MAX - 1) as u16, 0, 0];
+
+        assert_eq!(empty_neighbors(grid, pos, &cell_map), vec![[32765, 0, 0]]);
+
+        let sim = SimulationConfig {
+            division_neighbor_distance: 2,
+            ..SimulationConfig::default()
+        };
+        let mut rng = rand::rng();
+
+        assert_eq!(
+            find_empty_neighbor_avoiding(grid, pos, &cell_map, None, &mut rng, &sim),
+            Some([32764, 0, 0])
+        );
     }
 }

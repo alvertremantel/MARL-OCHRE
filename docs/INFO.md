@@ -10,12 +10,13 @@ Today the code is small enough to read end to end, and it is already coherent. I
 
 The project has a clean split between environment, cells, orchestration, and outputs.
 
-- `crates/marl-engine/src/config.rs` defines compile-time physics constants and runtime run parameters.
+- `crates/marl-config/src/lib.rs` defines runtime grid, physics, and output configuration plus fixed species/ruleset array sizes.
 - `crates/marl-engine/src/field.rs` owns the extracellular chemical field and the diffusion solver.
 - `crates/marl-engine/src/cell.rs` owns the evolvable cell ruleset, internal state, per-tick update, and mutation logic.
 - `crates/marl-engine/src/light.rs` computes a separate light availability field from the current chemistry and occupancy.
 - `crates/marl-engine/src/main.rs` ties everything together: seeding, tick order, births, deaths, and output cadence.
 - `crates/marl-output/src/data.rs` and `crates/marl-output/src/snapshot.rs` convert state into files for later analysis.
+- `crates/marl-analysis` and `crates/marl-analyze` provide the canonical headless analysis workflow for completed runs.
 - `crates/marl-engine/src/hgt.rs` contains a horizontal gene transfer primitive that is currently not invoked.
 - `crates/marl-output/src/binary_dump.rs` writes raw binary field arrays, compact viewer cell records, and `run_meta.json`.
 - `crates/marl-format/src/lib.rs` owns the shared binary schema (`RunMeta`, `ViewerCellRecord`, field layout constants).
@@ -279,7 +280,7 @@ Several current simplifications matter if this code is used for serious experime
 - Dead cells are removed; their internals are not lysed back into the field.
 - Quiescence is partial rather than a deep dormancy mode.
 - Cells are updated sequentially with immediate field writes inside each tick.
-- Most physics, chemistry, and output parameters are runtime-configurable via TOML + CLI. Grid dimensions and species counts remain compile-time constants (they determine array sizes).
+- Grid dimensions, physics, chemistry, and output parameters are runtime-configurable via TOML + CLI. Species counts and ruleset slot counts remain compile-time constants because they determine fixed-size cell/ruleset arrays.
 - Unit and integration tests exist for engine field diffusion, binary dump layout, GPU diffusion equivalence, viewer CLI/IO/camera/renderer/GUI, and the shared format crate. Run with `cargo test --workspace`.
 
 These are not necessarily flaws for the present phase, but they define the boundary between prototype behavior and stronger scientific claims.

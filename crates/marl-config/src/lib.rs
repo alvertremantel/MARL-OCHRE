@@ -7,23 +7,24 @@ pub mod stoich;
 use stoich::StoichEnforcement;
 
 // ============================================================================
-// GRID DIMENSIONS — compile-time constants
+// DEFAULT GRID DIMENSIONS
 // ============================================================================
-// These must be const because they determine array sizes throughout the code.
-// To run at a different grid size, change these values and recompile:
-//   cargo build --release    (~2 seconds incremental)
-//
 // Suggested sizes:
 //   64x64x32   — quick debug runs (~7 ticks/sec)
 //   128x128x64 — calibration runs (~1 tick/sec est.)
 //   256x256x128 — production runs (needs rayon, ~0.1 tick/sec est.)
-pub const GRID_X: usize = 128;
-pub const GRID_Y: usize = 128;
-pub const GRID_Z: usize = 64;
+pub const DEFAULT_GRID_X: usize = 128;
+pub const DEFAULT_GRID_Y: usize = 128;
+pub const DEFAULT_GRID_Z: usize = 64;
 
-const _: () = assert!(GRID_X <= i16::MAX as usize);
-const _: () = assert!(GRID_Y <= i16::MAX as usize);
-const _: () = assert!(GRID_Z <= i16::MAX as usize);
+// Backward-compatible default dimensions for tests and GPU fallback paths.
+pub const GRID_X: usize = DEFAULT_GRID_X;
+pub const GRID_Y: usize = DEFAULT_GRID_Y;
+pub const GRID_Z: usize = DEFAULT_GRID_Z;
+
+const _: () = assert!(DEFAULT_GRID_X <= i16::MAX as usize);
+const _: () = assert!(DEFAULT_GRID_Y <= i16::MAX as usize);
+const _: () = assert!(DEFAULT_GRID_Z <= i16::MAX as usize);
 
 // Species counts
 pub const S_EXT: usize = 12; // external chemical species
@@ -38,9 +39,72 @@ pub const S_EFFECTORS: usize = 8;
 // ============================================================================
 // RUNTIME CONFIGURATION — SimulationConfig + OutputConfig
 // ============================================================================
-// All physics, chemistry, biology, and output parameters are now runtime-
-// configurable via an optional TOML file and CLI overrides. Only the array-
-// size constants above remain compile-time.
+// Grid dimensions, physics, chemistry, biology, and output parameters are now
+// runtime-configurable via an optional TOML file and CLI overrides. Species and
+// ruleset array sizes remain compile-time because they determine fixed-size
+// cell/ruleset arrays.
+
+/// Runtime grid dimensions for the 3D simulation domain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(default)]
+pub struct GridDims {
+    #[serde(default = "default_grid_x")]
+    pub x: usize,
+    #[serde(default = "default_grid_y")]
+    pub y: usize,
+    #[serde(default = "default_grid_z")]
+    pub z: usize,
+}
+
+fn default_grid_x() -> usize {
+    DEFAULT_GRID_X
+}
+
+fn default_grid_y() -> usize {
+    DEFAULT_GRID_Y
+}
+
+fn default_grid_z() -> usize {
+    DEFAULT_GRID_Z
+}
+
+impl GridDims {
+    pub fn validate(self) -> Result<(), String> {
+        if self.x == 0 || self.y == 0 || self.z == 0 {
+            return Err(format!(
+                "grid dimensions must be nonzero, got {}x{}x{}",
+                self.x, self.y, self.z
+            ));
+        }
+        if self.x > i16::MAX as usize || self.y > i16::MAX as usize || self.z > i16::MAX as usize {
+            return Err(format!(
+                "grid dimensions must fit i16/u16 coordinate math, got {}x{}x{}",
+                self.x, self.y, self.z
+            ));
+        }
+        self.voxel_count()
+            .ok_or_else(|| "grid voxel count overflow".to_string())?;
+        Ok(())
+    }
+
+    pub fn voxel_count(self) -> Option<usize> {
+        self.x.checked_mul(self.y)?.checked_mul(self.z)
+    }
+
+    pub fn field_float_count(self) -> Option<usize> {
+        self.voxel_count()?.checked_mul(S_EXT)
+    }
+}
+
+impl Default for GridDims {
+    fn default() -> Self {
+        Self {
+            x: DEFAULT_GRID_X,
+            y: DEFAULT_GRID_Y,
+            z: DEFAULT_GRID_Z,
+        }
+    }
+}
 
 /// Physics, chemistry, biology, and seeding parameters.
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -272,7 +336,10 @@ impl Default for OutputConfig {
             snapshot_interval: 500,
             image_interval: 500,
             seed_count: 30,
-            output_dir: format!("output/run_{}x{}x{}", GRID_X, GRID_Y, GRID_Z),
+            output_dir: format!(
+                "output/run_{}x{}x{}",
+                DEFAULT_GRID_X, DEFAULT_GRID_Y, DEFAULT_GRID_Z
+            ),
             xz_snapshot_species: Vec::new(),
             xy_slice_depths_frac: Vec::new(),
             write_binary_field: true,
@@ -296,6 +363,8 @@ impl Default for OutputConfig {
 /// Unified configuration: simulation + output.
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 pub struct Config {
+    #[serde(default)]
+    pub grid: GridDims,
     #[serde(default)]
     pub simulation: SimulationConfig,
     #[serde(default)]
@@ -402,6 +471,64 @@ mod tests {
         assert!(!out.write_stoich_tick_log);
         assert!(!out.write_stoich_v2_summary);
         assert!(!out.write_stoich_v2_events);
+    }
+
+    #[test]
+    fn grid_defaults_and_toml_override_work() {
+        let cfg = Config::default();
+        assert_eq!(cfg.grid, GridDims::default());
+        assert!(cfg.grid.validate().is_ok());
+
+        let cfg: Config = toml::from_str(
+            r#"
+            [grid]
+            x = 64
+            y = 64
+            z = 32
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            cfg.grid,
+            GridDims {
+                x: 64,
+                y: 64,
+                z: 32
+            }
+        );
+        assert!(cfg.grid.validate().is_ok());
+
+        let cfg: Config = toml::from_str(
+            r#"
+            [grid]
+            x = 96
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            cfg.grid,
+            GridDims {
+                x: 96,
+                y: DEFAULT_GRID_Y,
+                z: DEFAULT_GRID_Z,
+            }
+        );
+    }
+
+    #[test]
+    fn invalid_grid_dimensions_are_rejected() {
+        assert!(GridDims { x: 0, y: 64, z: 32 }.validate().is_err());
+        assert!(
+            GridDims {
+                x: i16::MAX as usize + 1,
+                y: 64,
+                z: 32,
+            }
+            .validate()
+            .is_err()
+        );
     }
 
     #[test]

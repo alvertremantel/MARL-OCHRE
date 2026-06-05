@@ -93,22 +93,25 @@ built-in defaults and any TOML config file:
 
 ### Grid dimensions
 
-Grid dimensions (`GRID_X`, `GRID_Y`, `GRID_Z`) and species counts (`S_EXT`,
-`M_INT`) are **compile-time constants** in
-`crates/marl-engine/src/config.rs`. To change grid size, edit those constants
-and recompile:
+Grid dimensions are runtime-configurable in TOML:
 
-```rust
-// crates/marl-engine/src/config.rs
-pub const GRID_X: usize = 64;
-pub const GRID_Y: usize = 64;
-pub const GRID_Z: usize = 32;
+```toml
+[grid]
+x = 64
+y = 64
+z = 32
 ```
+
+Species counts (`S_EXT`, `M_INT`) and ruleset slot counts remain compile-time
+because they determine fixed-size cell/ruleset arrays.
 
 Suggested sizes:
 - `64×64×32` — quick debug runs (~7 ticks/s)
 - `128×128×64` — calibration runs (default)
 - `256×256×128` — production runs (needs more than one thread; ~0.1 ticks/s estimated)
+
+GPU diffusion currently uses a shader compiled for the default `128×128×64`
+grid. Non-default grids automatically fall back to CPU diffusion.
 
 ---
 
@@ -200,6 +203,18 @@ Core physics and biology parameters:
 | `boundary_prime_reductant` | f32 | 0.5 | Initial reductant concentration in primed layers |
 | `stoich_enforcement` | enum | `"off"` | `"off"`, `"audit"`, or `"strict"` full-system stoichiometry policy |
 
+### `[grid]` section
+
+Grid dimensions for the 3D simulation domain:
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `x` | usize | 128 | X dimension, in voxels |
+| `y` | usize | 128 | Y dimension, in voxels |
+| `z` | usize | 64 | Vertical depth, in voxels |
+
+All dimensions must be nonzero and fit the simulation's coordinate math.
+
 ### `[output]` section
 
 Output cadence, directories, and format toggles:
@@ -268,6 +283,32 @@ python scripts/check_binary_dump.py output/run_128x128x64 0
 ```
 
 See [`docs/SCRIPTS.md`](SCRIPTS.md) for details.
+
+### Headless biological analysis
+
+`marl-analyze` is the canonical CLI for non-GUI interpretation of completed
+runs. It reuses the Rust binary readers used by the viewer and writes durable
+report artifacts instead of living under `scripts/`.
+
+Analyze one run:
+
+```bash
+cargo run -p marl-analyze -- run output/run_128x128x64
+```
+
+This prints a terminal summary and writes `analysis/analysis.json` plus
+`analysis/analysis.md` inside the run directory.
+
+Compare runs:
+
+```bash
+cargo run -p marl-analyze -- compare output/run_a output/run_b --out-dir output/compare_a_b
+```
+
+By default, analysis reads the full `ticks.csv` trajectory and samples the
+first, middle, and latest binary snapshots. Use `--all-snapshots`,
+`--latest-only`, or `--ticks 0,500,5000` to change that policy. Use
+`--no-rulesets` when full ruleset sidecars are unavailable or not needed.
 
 ### Stoichiometry audit outputs
 
@@ -439,21 +480,21 @@ convert oxidant_xz_500.ppm oxidant_xz_500.png
 
 ### Changing grid size
 
-Edit `crates/marl-engine/src/config.rs`:
+Set the `[grid]` section in your config file and choose a matching
+`output_dir`, for example:
 
-```rust
-pub const GRID_X: usize = 64;
-pub const GRID_Y: usize = 64;
-pub const GRID_Z: usize = 32;
+```toml
+[grid]
+x = 64
+y = 64
+z = 32
+
+[output]
+output_dir = "output/run_64x64x32"
 ```
 
-Then rebuild:
-
-```bash
-cargo build -p marl-engine --release
-```
-
-The default output directory and binary file sizes will adjust automatically.
+Binary metadata and viewer dimensions are written from the runtime grid in
+`run_meta.json`.
 
 ---
 
@@ -475,10 +516,11 @@ existing snapshot for the selected tick. Verify the path and that the engine has
 written at least one binary field snapshot.
 Use the GUI `Open…` button or text field to navigate to a valid directory.
 
-### "grid dimensions in run_meta.json don't match compile-time constants"
+### "field size mismatch"
 
-The viewer was compiled with different `GRID_X`/`GRID_Y`/`GRID_Z` values than
-the engine that produced the output. Recompile both with matching constants.
+The selected field file does not match the dimensions in `run_meta.json`. Verify
+that the output directory and tick belong to the same run and were not mixed with
+files from another grid size.
 
 ### `rfd` folder picker does nothing
 

@@ -4,7 +4,6 @@ use marl_config::stoich::{
 use marl_config::*;
 use rayon::prelude::*;
 
-const GRID_SIZE: usize = GRID_X * GRID_Y * GRID_Z;
 const EXPLICIT_DIFFUSION_CFL_LIMIT: f32 = 1.0 / 6.0;
 const MAX_DIFFUSION_SUBSTEPS: usize = 100_000;
 
@@ -106,7 +105,8 @@ fn required_stable_substeps(sim: &SimulationConfig) -> usize {
 /// so no copying is ever needed.
 #[derive(Clone)]
 pub struct Field {
-    /// Concentration data: GRID_Z * GRID_Y * GRID_X * S_EXT floats
+    grid: GridDims,
+    /// Concentration data: grid_z * grid_y * grid_x * S_EXT floats
     pub data: Vec<f32>,
     /// Double-buffer for diffusion solver — same size as `data`.
     /// Swapped with `data` each substep to avoid allocation in the hot loop.
@@ -114,17 +114,59 @@ pub struct Field {
 }
 
 impl Field {
-    pub fn new() -> Self {
-        let n = GRID_X * GRID_Y * GRID_Z * S_EXT;
+    pub fn new(grid: GridDims) -> Self {
+        grid.validate().expect("invalid grid dimensions");
+        let n = grid
+            .field_float_count()
+            .expect("validated grid field length must fit usize");
         Self {
+            grid,
             data: vec![0.0; n],
             scratch: vec![0.0; n],
         }
     }
 
+    pub fn new_default() -> Self {
+        Self::new(GridDims::default())
+    }
+
+    #[inline]
+    pub fn grid(&self) -> GridDims {
+        self.grid
+    }
+
+    #[inline]
+    pub fn grid_x(&self) -> usize {
+        self.grid.x
+    }
+
+    #[inline]
+    pub fn grid_y(&self) -> usize {
+        self.grid.y
+    }
+
+    #[inline]
+    pub fn grid_z(&self) -> usize {
+        self.grid.z
+    }
+
+    #[inline]
+    pub fn voxel_count(&self) -> usize {
+        self.grid
+            .voxel_count()
+            .expect("validated grid voxel count must fit usize")
+    }
+
+    #[inline]
+    pub fn field_len(&self) -> usize {
+        self.grid
+            .field_float_count()
+            .expect("validated grid field length must fit usize")
+    }
+
     #[inline]
     fn idx(&self, x: usize, y: usize, z: usize, s: usize) -> usize {
-        ((z * GRID_Y + y) * GRID_X + x) * S_EXT + s
+        ((z * self.grid.y + y) * self.grid.x + x) * S_EXT + s
     }
 
     #[inline]
@@ -166,14 +208,14 @@ impl Field {
 
     /// Helper: compute flat index without &self (needed for parallel closures).
     #[inline]
-    fn idx_static(x: usize, y: usize, z: usize, s: usize) -> usize {
-        ((z * GRID_Y + y) * GRID_X + x) * S_EXT + s
+    fn idx_static(grid: GridDims, x: usize, y: usize, z: usize, s: usize) -> usize {
+        ((z * grid.y + y) * grid.x + x) * S_EXT + s
     }
 
     /// Read a concentration from a raw data slice (used in parallel diffusion).
     #[inline]
-    fn get_from(src: &[f32], x: usize, y: usize, z: usize, s: usize) -> f32 {
-        src[Self::idx_static(x, y, z, s)]
+    fn get_from(src: &[f32], grid: GridDims, x: usize, y: usize, z: usize, s: usize) -> f32 {
+        src[Self::idx_static(grid, x, y, z, s)]
     }
 
     #[inline]
@@ -220,18 +262,19 @@ impl Field {
         occupancy: Option<&[bool]>,
         sim: &SimulationConfig,
     ) {
+        let grid = self.grid;
         let src = &self.data;
-        let layer_size = GRID_Y * GRID_X * S_EXT;
-        let voxel_layer_size = GRID_Y * GRID_X;
+        let layer_size = grid.y * grid.x * S_EXT;
+        let voxel_layer_size = grid.y * grid.x;
 
         self.scratch
             .par_chunks_mut(layer_size)
             .enumerate()
             .for_each(|(z, dst_layer)| {
-                for y in 0..GRID_Y {
-                    for x in 0..GRID_X {
+                for y in 0..grid.y {
+                    for x in 0..grid.x {
                         let occ_here =
-                            occupancy.is_some_and(|o| o[z * voxel_layer_size + y * GRID_X + x]);
+                            occupancy.is_some_and(|o| o[z * voxel_layer_size + y * grid.x + x]);
 
                         // Occupied voxels are excluded from diffusion entirely.
                         // Their field concentrations are meaningless (chemicals
@@ -239,38 +282,38 @@ impl Field {
                         // Just copy unchanged to maintain buffer consistency.
                         if occ_here {
                             for s in 0..S_EXT {
-                                let local_idx = (y * GRID_X + x) * S_EXT + s;
-                                dst_layer[local_idx] = Self::get_from(src, x, y, z, s);
+                                let local_idx = (y * grid.x + x) * S_EXT + s;
+                                dst_layer[local_idx] = Self::get_from(src, grid, x, y, z, s);
                             }
                             continue;
                         }
 
                         // --- Empty voxel: compute conservative face fluxes ---
 
-                        let base = (y * GRID_X + x) * S_EXT;
-                        let center_idx = Self::idx_static(x, y, z, 0);
+                        let base = (y * grid.x + x) * S_EXT;
+                        let center_idx = Self::idx_static(grid, x, y, z, 0);
                         let niche_here = Self::niche_factor(src[center_idx + 7], sim);
 
                         // Check which neighbors are occupied or walls once per voxel.
                         // Walls and occupied neighbors are zero-flux faces.
                         let occ_check = |nx: usize, ny: usize, nz: usize| -> bool {
-                            occupancy.is_some_and(|o| o[nz * voxel_layer_size + ny * GRID_X + nx])
+                            occupancy.is_some_and(|o| o[nz * voxel_layer_size + ny * grid.x + nx])
                         };
                         let neighbor = |nx: usize, ny: usize, nz: usize| {
                             if occ_check(nx, ny, nz) {
                                 None
                             } else {
-                                let idx = Self::idx_static(nx, ny, nz, 0);
+                                let idx = Self::idx_static(grid, nx, ny, nz, 0);
                                 Some((idx, Self::niche_factor(src[idx + 7], sim)))
                             }
                         };
 
                         let xm = (x > 0).then(|| neighbor(x - 1, y, z)).flatten();
-                        let xp = (x + 1 < GRID_X).then(|| neighbor(x + 1, y, z)).flatten();
+                        let xp = (x + 1 < grid.x).then(|| neighbor(x + 1, y, z)).flatten();
                         let ym = (y > 0).then(|| neighbor(x, y - 1, z)).flatten();
-                        let yp = (y + 1 < GRID_Y).then(|| neighbor(x, y + 1, z)).flatten();
+                        let yp = (y + 1 < grid.y).then(|| neighbor(x, y + 1, z)).flatten();
                         let zm = (z > 0).then(|| neighbor(x, y, z - 1)).flatten();
-                        let zp = (z + 1 < GRID_Z).then(|| neighbor(x, y, z + 1)).flatten();
+                        let zp = (z + 1 < grid.z).then(|| neighbor(x, y, z + 1)).flatten();
                         let neighbors = [xm, xp, ym, yp, zm, zp];
 
                         for s in 0..S_EXT {
@@ -309,8 +352,8 @@ impl Field {
         validate_diffusion_config(sim).expect("invalid diffusion configuration");
         assert_eq!(
             occupancy.len(),
-            GRID_SIZE,
-            "occupancy length must match GRID_X * GRID_Y * GRID_Z"
+            self.voxel_count(),
+            "occupancy length must match field voxel count"
         );
         let substeps = stable_diffusion_substeps(sim);
         if substeps == 0 {
@@ -352,8 +395,8 @@ impl Field {
         keep_events: bool,
     ) {
         // Top face: oxidant (species 1) and carbon (species 3)
-        for y in 0..GRID_Y {
-            for x in 0..GRID_X {
+        for y in 0..self.grid.y {
+            for x in 0..self.grid.x {
                 let ox = self.get(x, y, 0, 1);
                 let new_ox = (ox + sim.source_rate_oxidant).min(sim.c_max);
                 self.set(x, y, 0, 1, new_ox);
@@ -370,9 +413,9 @@ impl Field {
         }
 
         // Bottom face: reductant (species 2)
-        for y in 0..GRID_Y {
-            for x in 0..GRID_X {
-                let z = GRID_Z - 1;
+        for y in 0..self.grid.y {
+            for x in 0..self.grid.x {
+                let z = self.grid.z - 1;
                 let re = self.get(x, y, z, 2);
                 let new_re = (re + sim.source_rate_reductant).min(sim.c_max);
                 self.set(x, y, z, 2, new_re);
@@ -408,7 +451,7 @@ fn record_boundary_source(
 
 impl Default for Field {
     fn default() -> Self {
-        Self::new()
+        Self::new_default()
     }
 }
 
@@ -417,9 +460,9 @@ mod tests {
     use super::*;
 
     fn init_deterministic_field(field: &mut Field) {
-        for z in 0..GRID_Z {
-            for y in 0..GRID_Y {
-                for x in 0..GRID_X {
+        for z in 0..field.grid_z() {
+            for y in 0..field.grid_y() {
+                for x in 0..field.grid_x() {
                     for s in 0..S_EXT {
                         let value = ((x * 13 + y * 17 + z * 19 + s * 23) % 541) as f32 * 0.001;
                         field.set(x, y, z, s, value);
@@ -446,6 +489,37 @@ mod tests {
             .chunks_exact(S_EXT)
             .map(|voxel| voxel[species] as f64)
             .sum()
+    }
+
+    fn test_grid() -> GridDims {
+        GridDims { x: 5, y: 4, z: 3 }
+    }
+
+    #[test]
+    fn default_field_uses_default_grid_dimensions() {
+        let field = Field::default();
+
+        assert_eq!(field.grid(), GridDims::default());
+        assert_eq!(field.grid_x(), GRID_X);
+        assert_eq!(field.grid_y(), GRID_Y);
+        assert_eq!(field.grid_z(), GRID_Z);
+        assert_eq!(field.voxel_count(), GRID_X * GRID_Y * GRID_Z);
+        assert_eq!(field.field_len(), GRID_X * GRID_Y * GRID_Z * S_EXT);
+        assert_eq!(field.data.len(), field.field_len());
+    }
+
+    #[test]
+    fn field_allocates_from_runtime_grid_dimensions() {
+        let grid = test_grid();
+        let field = Field::new(grid);
+
+        assert_eq!(field.grid(), grid);
+        assert_eq!(field.grid_x(), 5);
+        assert_eq!(field.grid_y(), 4);
+        assert_eq!(field.grid_z(), 3);
+        assert_eq!(field.voxel_count(), 60);
+        assert_eq!(field.field_len(), 60 * S_EXT);
+        assert_eq!(field.data.len(), 60 * S_EXT);
     }
 
     #[test]
@@ -511,14 +585,27 @@ mod tests {
             ..Default::default()
         };
 
-        let mut field = Field::new();
+        let mut field = Field::new(test_grid());
         init_deterministic_field(&mut field);
         let before = field.data.clone();
-        let occupancy = vec![false; GRID_SIZE];
+        let occupancy = vec![false; field.voxel_count()];
 
         field.diffuse_tick_with_cells(&occupancy, &sim);
 
         assert_eq!(field.data, before);
+    }
+
+    #[test]
+    #[should_panic(expected = "occupancy length must match field voxel count")]
+    fn occupancy_length_must_match_runtime_grid() {
+        let sim = SimulationConfig {
+            diffusion_substeps: 0,
+            ..Default::default()
+        };
+        let mut field = Field::new(test_grid());
+        let occupancy = vec![false; field.voxel_count() - 1];
+
+        field.diffuse_tick_with_cells(&occupancy, &sim);
     }
 
     #[test]
@@ -528,16 +615,16 @@ mod tests {
             ..Default::default()
         };
 
-        let mut field = Field::new();
+        let mut field = Field::new(test_grid());
         init_deterministic_field(&mut field);
 
-        let x = GRID_X / 2;
-        let y = GRID_Y / 2;
-        let z = GRID_Z / 2;
+        let x = field.grid_x() / 2;
+        let y = field.grid_y() / 2;
+        let z = field.grid_z() / 2;
         let before = field.read_voxel(x, y, z);
 
-        let mut occupancy = vec![false; GRID_X * GRID_Y * GRID_Z];
-        occupancy[z * GRID_Y * GRID_X + y * GRID_X + x] = true;
+        let mut occupancy = vec![false; field.voxel_count()];
+        occupancy[z * field.grid_y() * field.grid_x() + y * field.grid_x() + x] = true;
 
         field.diffuse_tick_with_cells(&occupancy, &sim);
 
@@ -547,14 +634,14 @@ mod tests {
     #[test]
     fn occupied_neighbor_is_zero_flux_barrier() {
         let sim = conservative_sim(1, 1.0);
-        let mut field = Field::new();
-        let x = GRID_X / 2;
-        let y = GRID_Y / 2;
-        let z = GRID_Z / 2;
+        let mut field = Field::new(test_grid());
+        let x = field.grid_x() / 2;
+        let y = field.grid_y() / 2;
+        let z = field.grid_z() / 2;
         field.set(x + 1, y, z, 1, 5.0);
 
-        let mut occupancy = vec![false; GRID_SIZE];
-        occupancy[z * GRID_Y * GRID_X + y * GRID_X + x] = true;
+        let mut occupancy = vec![false; field.voxel_count()];
+        occupancy[z * field.grid_y() * field.grid_x() + y * field.grid_x() + x] = true;
 
         let before = total_species(&field, 1);
         field.diffuse_tick_with_cells(&occupancy, &sim);
@@ -571,17 +658,29 @@ mod tests {
     fn heterogeneous_eps_diffusion_conserves_mass_without_decay() {
         let sim = conservative_sim(1, 1.0);
 
-        let mut field = Field::new();
-        for z in 0..GRID_Z {
-            for y in 0..GRID_Y {
-                for x in 0..GRID_X {
-                    let structural = if x < GRID_X / 2 { 0.0 } else { 10.0 };
+        let mut field = Field::new(GridDims { x: 6, y: 4, z: 3 });
+        for z in 0..field.grid_z() {
+            for y in 0..field.grid_y() {
+                for x in 0..field.grid_x() {
+                    let structural = if x < field.grid_x() / 2 { 0.0 } else { 10.0 };
                     field.set(x, y, z, 7, structural);
                 }
             }
         }
-        field.set(GRID_X / 2 - 1, GRID_Y / 2, GRID_Z / 2, 1, 2.0);
-        field.set(GRID_X / 2, GRID_Y / 2, GRID_Z / 2, 1, 1.0);
+        field.set(
+            field.grid_x() / 2 - 1,
+            field.grid_y() / 2,
+            field.grid_z() / 2,
+            1,
+            2.0,
+        );
+        field.set(
+            field.grid_x() / 2,
+            field.grid_y() / 2,
+            field.grid_z() / 2,
+            1,
+            1.0,
+        );
 
         let before = total_species(&field, 1);
         field.diffuse_tick(&sim);
@@ -600,9 +699,9 @@ mod tests {
             ..Default::default()
         };
 
-        let mut field = Field::new();
+        let mut field = Field::new(test_grid());
         init_deterministic_field(&mut field);
-        let occupancy = vec![false; GRID_X * GRID_Y * GRID_Z];
+        let occupancy = vec![false; field.voxel_count()];
 
         field.diffuse_tick_with_cells(&occupancy, &sim);
 

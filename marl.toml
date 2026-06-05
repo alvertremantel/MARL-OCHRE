@@ -2,6 +2,11 @@
 # Copy this file and pass `--config myrun.toml` to use your own settings.
 # All values shown here are the built-in defaults.
 
+[grid]
+x = 128
+y = 128
+z = 64
+
 [simulation]
 dx = 0.0001                     # 100 um voxel size
 dt = 1.0                        # 1 tick = 1 day

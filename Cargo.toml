@@ -1,5 +1,7 @@
 [workspace]
 members = [
+    "crates/marl-analysis",
+    "crates/marl-analyze",
     "crates/marl-cell",
     "crates/marl-config",
     "crates/marl-engine",

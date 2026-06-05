@@ -71,23 +71,13 @@ pub fn load_snapshot(args: &ViewerArgs) -> Result<SnapshotPayload, Box<dyn Error
                 .into(),
         );
     }
-    let field_path = snapshot_path(&args.output_dir, &meta.field_file_pattern, args.tick)?;
-    let field_bytes = read_binary_payload_bounded(&field_path, meta.field_byte_len)?;
-    if field_bytes.len() as u64 != meta.field_byte_len {
-        return Err(format!(
-            "{} has {} bytes, expected {} from run_meta.json",
-            field_path.display(),
-            field_bytes.len(),
-            meta.field_byte_len
-        )
-        .into());
-    }
+    let field_bytes = load_field_bytes(&args.output_dir, args.tick, &meta)?;
 
     // --- tick_<T>.cells.bin ---
     let cells = if args.cell_mode == CellMode::Off {
         Vec::new()
     } else {
-        load_cell_records(args, &meta)?
+        load_cell_records(&args.output_dir, args.tick, &meta)?
     };
 
     Ok(SnapshotPayload {
@@ -173,9 +163,12 @@ fn parse_tick_file_name_with_pattern(name: &str, pattern: &str) -> Option<u64> {
 // Cell record parsing
 // ---------------------------------------------------------------------------
 
-fn load_cell_records(args: &ViewerArgs, meta: &RunMeta) -> Result<Vec<LoadedCell>, Box<dyn Error>> {
-    let cells_path = snapshot_path(&args.output_dir, &meta.cell_file_pattern, args.tick)?;
-
+pub fn load_cell_records(
+    output_dir: &Path,
+    tick: u64,
+    meta: &RunMeta,
+) -> Result<Vec<LoadedCell>, Box<dyn Error>> {
+    let cells_path = snapshot_path(output_dir, &meta.cell_file_pattern, tick)?;
     if !meta.write_binary_cells {
         return Err("cell output was disabled for this run but cells were requested".into());
     }
@@ -214,14 +207,40 @@ fn load_cell_records(args: &ViewerArgs, meta: &RunMeta) -> Result<Vec<LoadedCell
     Ok(cells)
 }
 
-fn snapshot_path(output_dir: &Path, pattern: &str, tick: u64) -> Result<PathBuf, Box<dyn Error>> {
+pub fn load_field_bytes(
+    output_dir: &Path,
+    tick: u64,
+    meta: &RunMeta,
+) -> Result<Vec<u8>, Box<dyn Error>> {
+    if !meta.write_binary_field {
+        return Err("field output was disabled for this run".into());
+    }
+    let field_path = snapshot_path(output_dir, &meta.field_file_pattern, tick)?;
+    let field_bytes = read_binary_payload_bounded(&field_path, meta.field_byte_len)?;
+    if field_bytes.len() as u64 != meta.field_byte_len {
+        return Err(format!(
+            "{} has {} bytes, expected {} from run_meta.json",
+            field_path.display(),
+            field_bytes.len(),
+            meta.field_byte_len
+        )
+        .into());
+    }
+    Ok(field_bytes)
+}
+
+pub fn snapshot_path(
+    output_dir: &Path,
+    pattern: &str,
+    tick: u64,
+) -> Result<PathBuf, Box<dyn Error>> {
     if !pattern.contains("<T>") {
         return Err(format!("snapshot pattern {pattern:?} does not contain <T>").into());
     }
     Ok(output_dir.join(pattern.replace("<T>", &tick.to_string())))
 }
 
-fn read_binary_payload_bounded(
+pub fn read_binary_payload_bounded(
     path: &Path,
     max_decompressed_len: u64,
 ) -> Result<Vec<u8>, Box<dyn Error>> {
@@ -379,20 +398,6 @@ mod tests {
 
     fn test_meta() -> RunMeta {
         RunMeta::new(128, 128, 64, 12, 16, true, true)
-    }
-
-    fn test_args(output_dir: PathBuf) -> ViewerArgs {
-        ViewerArgs {
-            output_dir,
-            tick: 0,
-            species: 0,
-            exposure: 18.0,
-            density_scale: 2.0,
-            steps: 160,
-            view_mode: crate::args::ViewMode::Iso,
-            cell_mode: CellMode::Starter,
-            cell_alpha: 0.95,
-        }
     }
 
     #[test]
@@ -623,8 +628,7 @@ mod tests {
         fs::create_dir_all(dir).unwrap();
 
         let meta = test_meta();
-        let args = test_args(dir.to_path_buf());
-        let err = load_cell_records(&args, &meta).unwrap_err();
+        let err = load_cell_records(dir, 0, &meta).unwrap_err();
         assert!(err.to_string().contains("not found"), "got: {err}");
         assert!(
             err.to_string().contains("cells were requested"),
@@ -642,8 +646,7 @@ mod tests {
 
         let mut meta = test_meta();
         meta.write_binary_cells = false;
-        let args = test_args(dir.to_path_buf());
-        let err = load_cell_records(&args, &meta).unwrap_err();
+        let err = load_cell_records(dir, 0, &meta).unwrap_err();
         assert!(err.to_string().contains("disabled"), "got: {err}");
 
         let _ = fs::remove_dir_all(dir);

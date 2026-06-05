@@ -33,6 +33,7 @@ fn cadence_due(tick: u32, max_ticks: u32, interval: u32) -> bool {
 }
 
 fn validate_run_config(cfg: &Config) -> Result<(), String> {
+    cfg.grid.validate()?;
     validate_diffusion_config(&cfg.simulation)
 }
 
@@ -50,11 +51,12 @@ pub fn run(cfg: Config, _use_gpu_diffusion: bool) {
         eprintln!("Invalid simulation configuration: {e}");
         return;
     }
+    let grid = cfg.grid;
 
     let mut rng = rand::rng();
 
-    let mut field = Field::new();
-    let mut light = LightField::new();
+    let mut field = Field::new(grid);
+    let mut light = LightField::new(grid);
 
     let writes_stoich_v1 = cfg.output.write_stoich_summary || cfg.output.write_stoich_tick_log;
     let writes_stoich_v2 = cfg.simulation.stoich_enforcement.is_enabled()
@@ -70,6 +72,7 @@ pub fn run(cfg: Config, _use_gpu_diffusion: bool) {
 
     // Create the data logger for optional CSV diagnostics and summaries.
     let mut logger = DataLogger::new(
+        grid,
         &cfg.output.output_dir,
         cfg.output.write_tick_log,
         cfg.output.write_stoich_tick_log,
@@ -80,7 +83,7 @@ pub fn run(cfg: Config, _use_gpu_diffusion: bool) {
         || cfg.output.write_binary_cells
         || cfg.output.ruleset_output_mode.is_enabled();
     if writes_binary {
-        binary_dump::write_run_meta(&cfg.output).expect("Failed to write run metadata");
+        binary_dump::write_run_meta(grid, &cfg.output).expect("Failed to write run metadata");
     }
 
     // Start with empty field — let boundary sources build gradients organically.
@@ -100,14 +103,15 @@ pub fn run(cfg: Config, _use_gpu_diffusion: bool) {
 
     // Seed three metabolisms — small populations at appropriate depths.
     // z_scale maps the "canonical" 200-layer depth to our actual grid depth,
-    // so metabolisms land at the right relative positions regardless of GRID_Z.
-    let z_scale = GRID_Z as f32 / 200.0;
+    // so metabolisms land at the right relative positions regardless of grid depth.
+    let z_scale = grid.z as f32 / 200.0;
     let sim = &cfg.simulation;
 
     // Phototrophs: surface
     let photo_lo = (sim.phototroph_z_lo * z_scale) as u16;
     let photo_hi = (sim.phototroph_z_hi * z_scale).max(photo_lo as f32 + 1.0) as u16;
     seed_cells(
+        grid,
         &mut cells,
         &mut cell_map,
         &mut rng,
@@ -122,6 +126,7 @@ pub fn run(cfg: Config, _use_gpu_diffusion: bool) {
     let chemo_lo = (sim.chemolithotroph_z_lo * z_scale) as u16;
     let chemo_hi = (sim.chemolithotroph_z_hi * z_scale).max(chemo_lo as f32 + 3.0) as u16;
     seed_cells(
+        grid,
         &mut cells,
         &mut cell_map,
         &mut rng,
@@ -136,6 +141,7 @@ pub fn run(cfg: Config, _use_gpu_diffusion: bool) {
     let ana_lo = (sim.anaerobe_z_lo * z_scale) as u16;
     let ana_hi = (sim.anaerobe_z_hi * z_scale).max(ana_lo as f32 + 3.0) as u16;
     seed_cells(
+        grid,
         &mut cells,
         &mut cell_map,
         &mut rng,
@@ -149,10 +155,10 @@ pub fn run(cfg: Config, _use_gpu_diffusion: bool) {
     println!("MARL v0.3 — CPU Prototype (Winogradsky)");
     println!(
         "Grid: {}x{}x{} ({:.1}M voxels), Species: {} ext / {} int",
-        GRID_X,
-        GRID_Y,
-        GRID_Z,
-        (GRID_X * GRID_Y * GRID_Z) as f64 / 1e6,
+        grid.x,
+        grid.y,
+        grid.z,
+        grid.voxel_count().unwrap_or(0) as f64 / 1e6,
         S_EXT,
         M_INT
     );
@@ -174,13 +180,20 @@ pub fn run(cfg: Config, _use_gpu_diffusion: bool) {
 
     #[cfg(feature = "gpu")]
     let mut gpu_diffuser = if _use_gpu_diffusion {
-        match GpuFieldDiffuser::new() {
-            Ok(diffuser) => Some(diffuser),
-            Err(e) => {
-                eprintln!(
-                    "Warning: GPU diffusion unavailable ({e}); falling back to CPU diffusion"
-                );
-                None
+        if grid != GridDims::default() {
+            eprintln!(
+                "Warning: GPU diffusion currently requires the default grid; falling back to CPU diffusion"
+            );
+            None
+        } else {
+            match GpuFieldDiffuser::new() {
+                Ok(diffuser) => Some(diffuser),
+                Err(e) => {
+                    eprintln!(
+                        "Warning: GPU diffusion unavailable ({e}); falling back to CPU diffusion"
+                    );
+                    None
+                }
             }
         }
     } else {
@@ -198,7 +211,7 @@ pub fn run(cfg: Config, _use_gpu_diffusion: bool) {
     // Track per-tick division/death counts for the data logger
     let mut tick_divisions: u64;
     let mut tick_deaths: u64;
-    let mut occupancy = vec![false; GRID_X * GRID_Y * GRID_Z];
+    let mut occupancy = vec![false; grid.voxel_count().expect("valid grid voxel count")];
     let mut stoich_run = StoichRunLedger::default();
 
     for tick in 0..cfg.output.max_ticks {
@@ -232,7 +245,7 @@ pub fn run(cfg: Config, _use_gpu_diffusion: bool) {
         occupancy.fill(false);
         for pos in cell_map.keys() {
             let idx =
-                pos[2] as usize * GRID_Y * GRID_X + pos[1] as usize * GRID_X + pos[0] as usize;
+                pos[2] as usize * grid.y * grid.x + pos[1] as usize * grid.x + pos[0] as usize;
             occupancy[idx] = true;
         }
         let field_totals_before_diffusion = writes_stoich_v2.then(|| field.species_totals());
@@ -329,6 +342,7 @@ pub fn run(cfg: Config, _use_gpu_diffusion: bool) {
                     let parent = &cells[*i];
                     let parent_lineage = parent.lineage_id;
                     if let Some(daughter_pos) = find_empty_neighbor_avoiding(
+                        grid,
                         parent.pos,
                         &cell_map,
                         Some(&reserved_birth_positions),
@@ -455,7 +469,7 @@ pub fn run(cfg: Config, _use_gpu_diffusion: bool) {
                 );
             }
             if cfg.output.write_binary_cells
-                && let Err(e) = binary_dump::write_cell_dump(&cells, t, &cfg.output)
+                && let Err(e) = binary_dump::write_cell_dump(grid, &cells, t, &cfg.output)
             {
                 eprintln!(
                     "Warning: failed to write binary cell snapshot at tick {}: {}",
@@ -491,7 +505,7 @@ pub fn run(cfg: Config, _use_gpu_diffusion: bool) {
         {
             let t = tick as u64;
             if mode.writes_layer_averages()
-                && let Err(e) = binary_dump::write_ruleset_layer_dump(&cells, t, &cfg.output)
+                && let Err(e) = binary_dump::write_ruleset_layer_dump(grid, &cells, t, &cfg.output)
             {
                 eprintln!(
                     "Warning: failed to write binary ruleset layer snapshot at tick {}: {}",
@@ -499,7 +513,7 @@ pub fn run(cfg: Config, _use_gpu_diffusion: bool) {
                 );
             }
             if mode.writes_full_dump()
-                && let Err(e) = binary_dump::write_ruleset_full_dump(&cells, t, &cfg.output)
+                && let Err(e) = binary_dump::write_ruleset_full_dump(grid, &cells, t, &cfg.output)
             {
                 eprintln!(
                     "Warning: failed to write binary ruleset full dump at tick {}: {}",
@@ -598,6 +612,7 @@ pub fn run(cfg: Config, _use_gpu_diffusion: bool) {
     // Write ancestry-colored XZ cross-section (red=photo, green=chemo, blue=anaerobe)
     if cfg.output.write_ancestry_map
         && let Err(e) = snapshot::write_ancestry_xz(
+            grid,
             &cells,
             &cell_map,
             cfg.output.max_ticks as u64,

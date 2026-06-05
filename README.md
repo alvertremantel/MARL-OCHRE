@@ -24,6 +24,8 @@ The current codebase is a Winogradsky-column style simulation: oxidant and carbo
 ## Key Crates
 
 - [`marl-engine`](crates/marl-engine/) — simulation library, engine binary, and optional GPU diffusion prototype
+- [`marl-analyze`](crates/marl-analyze/) — headless run/comparison analysis CLI
+- [`marl-analysis`](crates/marl-analysis/) — reusable analysis/reporting library
 - [`marl-viewer-rs`](crates/marl-viewer-rs/) — standalone `wgpu` 3D viewer with `egui` GUI
 - [`marl-format`](crates/marl-format/) — shared binary metadata and cell-record schema for engine/viewer interop
 
@@ -54,7 +56,7 @@ A detailed architecture walkthrough lives in [`docs/INFO.md`](docs/INFO.md).
 - Cell occupancy: one cell per voxel
 - Light model: Beer-Lambert attenuation from the surface
 - Evolution path: vertical mutation during division
-- Configuration: runtime TOML + CLI for most physics and output parameters; grid dimensions remain compile-time
+- Configuration: runtime TOML + CLI for grid dimensions, physics, and output parameters
 
 This repository is a functional prototype, not a polished platform. The core simulation loop, field physics, lineage tracking, viewer-oriented dumps, run summaries, and interactive viewer are implemented. Several intended extensions are present only in partial form.
 
@@ -79,6 +81,9 @@ cargo run -p marl-viewer-rs --release -- output/run_128x128x64 --tick 0
 
 # Validate a binary viewer dump
 python scripts/check_binary_dump.py output/run_128x128x64 0
+
+# Generate headless biological interpretation reports
+cargo run -p marl-analyze -- run output/run_128x128x64
 ```
 
 See [`docs/USAGE.md`](docs/USAGE.md) for comprehensive build and run instructions.

@@ -1,0 +1,10 @@
+[package]
+name = "marl-analysis"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+marl-format = { path = "../marl-format" }
+marl-viewer-core = { path = "../marl-viewer-core" }
+serde.workspace = true
+serde_json.workspace = true

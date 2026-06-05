@@ -133,6 +133,8 @@ pub struct DataLogger {
     /// Path to the output directory (created on construction).
     output_dir: PathBuf,
 
+    grid: GridDims,
+
     /// Buffered writer for ticks.csv — kept open for the entire run so we
     /// only pay the file-open cost once.
     ticks_writer: Option<BufWriter<File>>,
@@ -157,6 +159,7 @@ impl DataLogger {
     /// # Errors
     /// Returns `std::io::Error` if directory creation or file opening fails.
     pub fn new(
+        grid: GridDims,
         output_dir: &str,
         write_tick_log: bool,
         write_stoich_tick_log: bool,
@@ -180,7 +183,7 @@ impl DataLogger {
                 writer,
                 "tick,population,avg_energy,avg_enzyme_a,avg_enzyme_b,avg_active_rxns,divisions_this_tick,deaths_this_tick"
             )?;
-            for z in 0..GRID_Z {
+            for z in 0..grid.z {
                 write!(writer, ",z{}_cells", z)?;
             }
             writeln!(writer)?;
@@ -220,6 +223,7 @@ impl DataLogger {
 
         Ok(Self {
             output_dir: dir,
+            grid,
             ticks_writer,
             stoich_writer,
             stoich_v2_event_writer,
@@ -264,7 +268,7 @@ impl DataLogger {
         let mut sum_active_rxns: f64 = 0.0;
 
         // One counter per z-layer for spatial distribution.
-        let mut z_counts = vec![0u64; GRID_Z];
+        let mut z_counts = vec![0u64; self.grid.z];
 
         for cell in cells {
             sum_energy += cell.internal[0] as f64;
@@ -284,7 +288,7 @@ impl DataLogger {
 
             // Tally which z-layer this cell lives in.
             let z = cell.pos[2] as usize;
-            if z < GRID_Z {
+            if z < self.grid.z {
                 z_counts[z] += 1;
             }
         }
@@ -316,7 +320,7 @@ impl DataLogger {
         )?;
 
         // Write per-z-layer cell counts.
-        for count in z_counts.iter().take(GRID_Z) {
+        for count in z_counts.iter().take(self.grid.z) {
             write!(writer, ",{count}")?;
         }
         writeln!(writer)?;
@@ -379,6 +383,7 @@ impl DataLogger {
     /// - `field` — the chemical concentration field
     /// - `light` — the light attenuation field
     pub fn snapshot_chemistry(&self, tick: u64, field: &Field, light: &LightField) -> Result<()> {
+        let grid = field.grid();
         let path = self.output_dir.join(format!("chem_{}.csv", tick));
         let file = File::create(&path)?;
         let mut w = BufWriter::new(file);
@@ -391,18 +396,17 @@ impl DataLogger {
         writeln!(w, ",light_avg")?;
 
         // Number of voxels in one XY plane — the denominator for averaging.
-        let xy_count = (GRID_X * GRID_Y) as f64;
+        let xy_count = (grid.x * grid.y) as f64;
 
-        for z in 0..GRID_Z {
+        for z in 0..grid.z {
             write!(w, "{}", z)?;
 
             // Sum each species across the XY plane for this z-layer.
-            // Using f64 accumulators because GRID_X * GRID_Y = 4096 voxels
-            // and f32 would start losing precision in the low bits.
+            // Using f64 accumulators because large XY planes can otherwise lose precision.
             for s in 0..S_EXT {
                 let mut sum: f64 = 0.0;
-                for y in 0..GRID_Y {
-                    for x in 0..GRID_X {
+                for y in 0..grid.y {
+                    for x in 0..grid.x {
                         sum += field.get(x, y, z, s) as f64;
                     }
                 }
@@ -411,8 +415,8 @@ impl DataLogger {
 
             // Average light intensity for this z-layer.
             let mut light_sum: f64 = 0.0;
-            for y in 0..GRID_Y {
-                for x in 0..GRID_X {
+            for y in 0..grid.y {
+                for x in 0..grid.x {
                     light_sum += light.get(x, y, z) as f64;
                 }
             }
@@ -690,7 +694,8 @@ impl DataLogger {
         let mut w = BufWriter::new(file);
 
         // -- Derived constants used in several sections below ----------------
-        let voxel_count = GRID_X * GRID_Y * GRID_Z;
+        let grid = field.grid();
+        let voxel_count = grid.voxel_count().unwrap_or(0);
         let pop = cells.len();
         let grid_capacity = voxel_count; // one cell per voxel maximum
         let pop_pct = if grid_capacity > 0 {
@@ -718,7 +723,7 @@ impl DataLogger {
         writeln!(
             w,
             "- Grid: {}x{}x{} ({} voxels)",
-            GRID_X, GRID_Y, GRID_Z, voxel_count
+            grid.x, grid.y, grid.z, voxel_count
         )?;
         writeln!(w, "- Ticks: {}", total_ticks)?;
         writeln!(
@@ -759,10 +764,10 @@ impl DataLogger {
         writeln!(w, "## Vertical Zonation")?;
         writeln!(w)?;
 
-        let mut z_counts = vec![0u64; GRID_Z];
+        let mut z_counts = vec![0u64; grid.z];
         for cell in cells {
             let z = cell.pos[2] as usize;
-            if z < GRID_Z {
+            if z < grid.z {
                 z_counts[z] += 1;
             }
         }
@@ -772,15 +777,14 @@ impl DataLogger {
         writeln!(w)?;
         writeln!(w, "| z | cells |")?;
         writeln!(w, "|---|-------|")?;
-        for (z, count) in z_counts.iter().enumerate().take(GRID_Z) {
+        for (z, count) in z_counts.iter().enumerate().take(grid.z) {
             writeln!(w, "| {z} | {count} |")?;
         }
         writeln!(w)?;
 
         // Aggregate into three zones: surface, middle, deep.
-        // Surface = z < GRID_Z/3, deep = z >= 2*GRID_Z/3, middle = the rest.
-        let third = GRID_Z / 3;
-        let two_thirds = 2 * GRID_Z / 3;
+        let third = grid.z / 3;
+        let two_thirds = 2 * grid.z / 3;
 
         let surface_count: u64 = z_counts[..third].iter().sum();
         let middle_count: u64 = z_counts[third..two_thirds].iter().sum();
@@ -815,16 +819,16 @@ impl DataLogger {
         // ====================================================================
         // CHEMICAL GRADIENTS — depth profile at center column
         // ====================================================================
-        // Sample the center column (x=GRID_X/2, y=GRID_Y/2) at three depths
+        // Sample the center column at three depths
         // to see whether the run produced the expected redox gradient.
         writeln!(w, "## Chemical Gradients (center column)")?;
         writeln!(w)?;
 
-        let cx = GRID_X / 2;
-        let cy = GRID_Y / 2;
+        let cx = grid.x / 2;
+        let cy = grid.y / 2;
         let z_surface = 0;
-        let z_mid = GRID_Z / 2;
-        let z_deep = GRID_Z - 1;
+        let z_mid = grid.z / 2;
+        let z_deep = grid.z - 1;
 
         // Species indices (from config/field layout):
         //   1 = oxidant, 2 = reductant, 3 = carbon, 4 = organic waste
@@ -866,10 +870,9 @@ impl DataLogger {
         )?;
 
         // Oxidant penetration depth: scan from surface downward, find first z
-        // where oxidant drops below 0.01. If it never does, report GRID_Z.
-        let oxidant_pen = (0..GRID_Z)
+        let oxidant_pen = (0..grid.z)
             .find(|&z| field.get(cx, cy, z, 1) < 0.01)
-            .unwrap_or(GRID_Z);
+            .unwrap_or(grid.z);
         writeln!(
             w,
             "- Oxidant penetration depth: z={} (first z where oxidant < 0.01)",
@@ -878,8 +881,7 @@ impl DataLogger {
 
         // Reductant penetration depth: scan from bottom upward, find first z
         // (from bottom) where reductant drops below 0.01. Reports depth
-        // from the bottom, so z=GRID_Z-1 scans upward.
-        let reductant_pen = (0..GRID_Z)
+        let reductant_pen = (0..grid.z)
             .rev()
             .find(|&z| field.get(cx, cy, z, 2) < 0.01)
             .unwrap_or(0);
@@ -984,7 +986,7 @@ impl DataLogger {
             )?;
         }
 
-        if (oxidant_pen as f64) < (GRID_Z as f64 / 2.0) {
+        if (oxidant_pen as f64) < (grid.z as f64 / 2.0) {
             writeln!(
                 w,
                 "- **Anoxic zone established** — oxidant penetrates to z={}",
@@ -1071,7 +1073,7 @@ mod tests {
     #[test]
     fn stoich_tick_log_and_summary_are_written() {
         let out_dir = test_output_dir("marl_output_stoich_audit_test");
-        let mut logger = DataLogger::new(&out_dir, false, true, true).unwrap();
+        let mut logger = DataLogger::new(GridDims::default(), &out_dir, false, true, true).unwrap();
         let mut tick = StoichTickLedger::default();
         tick.record_legacy_reaction(
             LegacyReactionAudit::new(3, 0, 15, 0xFF, 2.0).actor(123),

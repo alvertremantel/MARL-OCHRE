@@ -2,7 +2,7 @@ use marl_cell::cell::CellState;
 use marl_config::stoich::{
     StoichEventKind, StoichRecord, StoichReservoir, StoichStage, StoichTickLedger, external_delta,
 };
-use marl_config::{GRID_X, GRID_Y, GRID_Z, SimulationConfig};
+use marl_config::{GridDims, SimulationConfig};
 use marl_field::field::Field;
 use rand::Rng;
 use std::collections::HashMap;
@@ -19,11 +19,12 @@ pub fn init_field_boundaries_with_stoich(
     mut stoich: Option<&mut StoichTickLedger>,
     keep_events: bool,
 ) {
+    let grid = field.grid();
     // Prime only the boundary faces (configurable layers deep) so initial cells
     // have a local substrate source but the bulk field is empty.
-    let layers = sim.boundary_prime_layers.min(GRID_Z);
-    for y in 0..GRID_Y {
-        for x in 0..GRID_X {
+    let layers = sim.boundary_prime_layers.min(grid.z);
+    for y in 0..grid.y {
+        for x in 0..grid.x {
             // Top layers: some oxidant and carbon (atmosphere analog)
             for z in 0..layers {
                 field.set(x, y, z, 1, sim.boundary_prime_oxidant); // oxidant
@@ -36,7 +37,7 @@ pub fn init_field_boundaries_with_stoich(
                 }
             }
             // Bottom layers: some reductant (geological source analog)
-            for z in (GRID_Z - layers)..GRID_Z {
+            for z in (grid.z - layers)..grid.z {
                 field.set(x, y, z, 2, sim.boundary_prime_reductant); // reductant
                 if let Some(ledger) = stoich.as_deref_mut() {
                     record_prime(ledger, 2, sim.boundary_prime_reductant, keep_events);
@@ -65,6 +66,7 @@ fn record_prime(ledger: &mut StoichTickLedger, species: usize, amount: f32, keep
 
 #[allow(clippy::too_many_arguments)]
 pub fn seed_cells(
+    grid: GridDims,
     cells: &mut Vec<CellState>,
     cell_map: &mut HashMap<[u16; 3], usize>,
     rng: &mut impl Rng,
@@ -75,10 +77,10 @@ pub fn seed_cells(
     sim: &SimulationConfig,
 ) {
     let margin = sim.seed_margin;
-    let x_hi = (GRID_X as u16).saturating_sub(margin);
-    let y_hi = (GRID_Y as u16).saturating_sub(margin);
-    let z_hi = z_hi.min(GRID_Z as u16);
-    let z_lo = z_lo.min(GRID_Z as u16);
+    let x_hi = (grid.x as u16).saturating_sub(margin);
+    let y_hi = (grid.y as u16).saturating_sub(margin);
+    let z_hi = z_hi.min(grid.z as u16);
+    let z_lo = z_lo.min(grid.z as u16);
     if margin >= x_hi || margin >= y_hi || z_lo >= z_hi {
         return;
     }
@@ -164,16 +166,17 @@ mod tests {
 
     #[test]
     fn boundary_priming_clamps_layers_to_grid_depth() {
+        let grid = GridDims { x: 8, y: 6, z: 4 };
         let sim = SimulationConfig {
-            boundary_prime_layers: GRID_Z + 10,
+            boundary_prime_layers: grid.z + 10,
             ..SimulationConfig::default()
         };
-        let mut field = Field::new();
+        let mut field = Field::new(grid);
 
         init_field_boundaries(&mut field, &sim);
 
         assert_eq!(field.get(0, 0, 0, 1), sim.boundary_prime_oxidant);
-        assert_eq!(field.get(0, 0, GRID_Z - 1, 2), sim.boundary_prime_reductant);
+        assert_eq!(field.get(0, 0, grid.z - 1, 2), sim.boundary_prime_reductant);
     }
 
     #[test]
@@ -181,18 +184,20 @@ mod tests {
         let mut cells = Vec::new();
         let mut cell_map = HashMap::new();
         let mut rng = StdRng::seed_from_u64(11);
+        let grid = GridDims { x: 8, y: 8, z: 4 };
         let sim = SimulationConfig {
-            seed_margin: GRID_X as u16,
+            seed_margin: grid.x as u16,
             ..SimulationConfig::default()
         };
 
         seed_cells(
+            grid,
             &mut cells,
             &mut cell_map,
             &mut rng,
             10,
-            GRID_Z as u16,
-            GRID_Z as u16,
+            grid.z as u16,
+            grid.z as u16,
             test_cell,
             &sim,
         );
@@ -206,12 +211,14 @@ mod tests {
         let mut cells = Vec::new();
         let mut cell_map = HashMap::new();
         let mut rng = StdRng::seed_from_u64(13);
+        let grid = GridDims { x: 8, y: 8, z: 4 };
         let sim = SimulationConfig {
             seed_margin: 1,
             ..SimulationConfig::default()
         };
 
         seed_cells(
+            grid,
             &mut cells,
             &mut cell_map,
             &mut rng,
@@ -224,8 +231,8 @@ mod tests {
 
         assert_eq!(cells.len(), 4);
         for cell in &cells {
-            assert!(cell.pos[0] >= 1 && cell.pos[0] < GRID_X as u16 - 1);
-            assert!(cell.pos[1] >= 1 && cell.pos[1] < GRID_Y as u16 - 1);
+            assert!(cell.pos[0] >= 1 && cell.pos[0] < grid.x as u16 - 1);
+            assert!(cell.pos[1] >= 1 && cell.pos[1] < grid.y as u16 - 1);
             assert!(cell.pos[2] < 2);
         }
     }

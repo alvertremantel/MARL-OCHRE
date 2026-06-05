@@ -1,0 +1,11 @@
+[package]
+name = "marl-analyze"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "marl-analyze"
+path = "src/main.rs"
+
+[dependencies]
+marl-analysis = { path = "../marl-analysis" }

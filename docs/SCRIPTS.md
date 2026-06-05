@@ -2,6 +2,10 @@
 
 This document describes utility scripts in the `scripts/` directory.
 
+Canonical biological interpretation lives in the Rust `marl-analyze` CLI and
+the reusable `marl-analysis` library. Keep `scripts/` for validation helpers,
+ad hoc exploration, and irregular wrappers around stable outputs.
+
 ---
 
 ## `check_binary_dump.py`

@@ -1,7 +1,4 @@
 use marl_cell::cell::CellState;
-use marl_config::GRID_X;
-use marl_config::GRID_Y;
-use marl_config::GRID_Z;
 use marl_field::field::Field;
 use marl_field::light::LightField;
 use std::time::Instant;
@@ -20,6 +17,8 @@ pub fn print_stats(
         return;
     }
 
+    let grid = field.grid();
+
     let n = cells.len() as f32;
     let avg_energy: f32 = cells.iter().map(|c| c.internal[0]).sum::<f32>() / n;
     let avg_enzyme: f32 = cells.iter().map(|c| c.internal[5]).sum::<f32>() / n;
@@ -36,7 +35,7 @@ pub fn print_stats(
         / n;
 
     // Count cells per z-third (surface / middle / deep)
-    let z_third = (GRID_Z / 3) as u16;
+    let z_third = (grid.z / 3) as u16;
     let (mut n_top, mut n_mid, mut n_bot) = (0u32, 0u32, 0u32);
     for c in cells {
         if c.pos[2] < z_third {
@@ -49,12 +48,12 @@ pub fn print_stats(
     }
 
     // Sample chemistry at center column
-    let cx = GRID_X / 2;
-    let cy = GRID_Y / 2;
+    let cx = grid.x / 2;
+    let cy = grid.y / 2;
     let ox_top = field.get(cx, cy, 0, 1);
-    let ox_mid = field.get(cx, cy, GRID_Z / 2, 1);
-    let red_bot = field.get(cx, cy, GRID_Z - 1, 2);
-    let org_mid = field.get(cx, cy, GRID_Z / 2, 4);
+    let ox_mid = field.get(cx, cy, grid.z / 2, 1);
+    let red_bot = field.get(cx, cy, grid.z - 1, 2);
+    let org_mid = field.get(cx, cy, grid.z / 2, 4);
 
     let elapsed = start.elapsed().as_secs_f32();
     let tps = if elapsed > 0.0 {
@@ -82,13 +81,14 @@ pub fn print_stats(
 }
 
 pub fn print_z_profile(cells: &[CellState], field: &Field, light: &LightField) {
+    let grid = field.grid();
     println!(
         "{:>3} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6}",
         "z", "cells", "light", "oxidnt", "reduct", "carbon", "organic"
     );
-    let cx = GRID_X / 2;
-    let cy = GRID_Y / 2;
-    for z in 0..GRID_Z {
+    let cx = grid.x / 2;
+    let cy = grid.y / 2;
+    for z in 0..grid.z {
         let n = cells.iter().filter(|c| c.pos[2] == z as u16).count();
         let l = light.get(cx, cy, z);
         let ox = field.get(cx, cy, z, 1);
