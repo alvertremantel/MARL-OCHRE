@@ -19,11 +19,13 @@ use marl_output::snapshot;
 
 use crate::seeding::{init_field_boundaries_with_stoich, seed_cells};
 use crate::spatial::{
-    apply_deltas_to_neighbors_with_stoich, find_empty_neighbor_avoiding, read_neighbor_environment,
+    apply_deltas_to_neighbors_with_stoich, find_empty_neighbor_avoiding, nearby_cell_indices,
+    read_neighbor_environment,
 };
 use crate::starter_metabolisms::{make_anaerobe, make_chemolithotroph, make_phototroph};
 use crate::stats::{print_stats, print_z_profile};
 
+use marl_cell::hgt::transfer_reaction;
 use rand::Rng;
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
@@ -34,7 +36,104 @@ fn cadence_due(tick: u32, max_ticks: u32, interval: u32) -> bool {
 
 fn validate_run_config(cfg: &Config) -> Result<(), String> {
     cfg.grid.validate()?;
-    validate_diffusion_config(&cfg.simulation)
+    validate_diffusion_config(&cfg.simulation)?;
+    validate_hgt_config(&cfg.simulation)
+}
+
+fn validate_hgt_config(sim: &SimulationConfig) -> Result<(), String> {
+    if !sim.hgt_base_rate.is_finite() {
+        return Err(format!(
+            "hgt_base_rate must be finite, got {}",
+            sim.hgt_base_rate
+        ));
+    }
+    if sim.hgt_base_rate < 0.0 {
+        return Err(format!(
+            "hgt_base_rate must be nonnegative, got {}",
+            sim.hgt_base_rate
+        ));
+    }
+    if sim.hgt_enabled {
+        if sim.hgt_interval == 0 {
+            return Err("hgt_interval must be > 0 when HGT is enabled".to_string());
+        }
+        if sim.hgt_radius == 0 {
+            return Err("hgt_radius must be > 0 when HGT is enabled".to_string());
+        }
+        if sim.hgt_max_events_per_tick == 0 {
+            return Err("hgt_max_events_per_tick must be > 0 when HGT is enabled".to_string());
+        }
+    }
+    Ok(())
+}
+
+fn hgt_due(tick: u32, sim: &SimulationConfig) -> bool {
+    sim.hgt_enabled
+        && sim.hgt_interval > 0
+        && sim.hgt_base_rate > 0.0
+        && sim.hgt_max_events_per_tick > 0
+        && tick.is_multiple_of(sim.hgt_interval)
+}
+
+fn hgt_accept_probability(base_rate: f32, propensity: f32) -> f32 {
+    if !base_rate.is_finite() || !propensity.is_finite() || base_rate <= 0.0 || propensity <= 0.0 {
+        return 0.0;
+    }
+    (base_rate * propensity).min(1.0)
+}
+
+fn run_hgt_phase(
+    tick: u32,
+    grid: GridDims,
+    cells: &mut [CellState],
+    cell_map: &HashMap<[u16; 3], usize>,
+    sim: &SimulationConfig,
+    rng: &mut impl Rng,
+) -> u64 {
+    if !hgt_due(tick, sim) || cells.len() < 2 {
+        return 0;
+    }
+
+    let mut received = vec![false; cells.len()];
+    let donor_rulesets: Vec<_> = cells.iter().map(|cell| cell.ruleset.clone()).collect();
+    let mut events = 0u64;
+    for recipient_idx in 0..cells.len() {
+        if events as usize >= sim.hgt_max_events_per_tick {
+            break;
+        }
+        if received[recipient_idx] {
+            continue;
+        }
+
+        let accept_probability = hgt_accept_probability(
+            sim.hgt_base_rate,
+            cells[recipient_idx].ruleset.hgt_propensity,
+        );
+        if accept_probability <= 0.0 || rng.random::<f32>() >= accept_probability {
+            continue;
+        }
+
+        let recipient_pos = cells[recipient_idx].pos;
+        let donors = nearby_cell_indices(grid, recipient_pos, cell_map, sim.hgt_radius);
+        if donors.is_empty() {
+            continue;
+        }
+        let donor_idx = donors[rng.random_range(0..donors.len())];
+        if donor_idx == recipient_idx {
+            continue;
+        }
+
+        if transfer_reaction(
+            &donor_rulesets[donor_idx],
+            &mut cells[recipient_idx].ruleset,
+            rng,
+        ) {
+            received[recipient_idx] = true;
+            events += 1;
+        }
+    }
+
+    events
 }
 
 /// Run the full MARL simulation tick loop.
@@ -425,6 +524,8 @@ pub fn run(cfg: Config, _use_gpu_diffusion: bool) {
             }
         }
 
+        let tick_hgt_events = run_hgt_phase(tick, grid, &mut cells, &cell_map, sim, &mut rng);
+
         // === STEP 6: Data logging and periodic output ===
         if writes_stoich {
             stoich_run.add_tick(&tick_stoich);
@@ -440,7 +541,13 @@ pub fn run(cfg: Config, _use_gpu_diffusion: bool) {
         }
 
         // Optionally log every tick to ticks.csv (lightweight — just one CSV row)
-        if let Err(e) = logger.log_tick(tick as u64, &cells, tick_divisions, tick_deaths) {
+        if let Err(e) = logger.log_tick(
+            tick as u64,
+            &cells,
+            tick_divisions,
+            tick_deaths,
+            tick_hgt_events,
+        ) {
             eprintln!("Warning: failed to log tick {}: {}", tick, e);
         }
 
@@ -650,9 +757,15 @@ fn record_diffusion_losses(
 
 #[cfg(test)]
 mod tests {
-    use super::{cadence_due, run, validate_run_config};
+    use super::{
+        cadence_due, hgt_accept_probability, hgt_due, run, run_hgt_phase, validate_run_config,
+    };
+    use crate::starter_metabolisms::{make_chemolithotroph, make_phototroph};
     use marl_config::stoich::StoichEnforcement;
-    use marl_config::{Config, SimulationConfig};
+    use marl_config::{Config, GridDims, SimulationConfig};
+    use rand::SeedableRng;
+    use rand::rngs::StdRng;
+    use std::collections::HashMap;
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -694,6 +807,181 @@ mod tests {
 
         let err = validate_run_config(&cfg).unwrap_err();
         assert!(err.contains("k_eps"));
+    }
+
+    #[test]
+    fn invalid_hgt_base_rate_is_rejected_before_run_loop() {
+        for bad_rate in [f32::NAN, f32::INFINITY, -0.1] {
+            let cfg = Config {
+                simulation: SimulationConfig {
+                    hgt_base_rate: bad_rate,
+                    ..SimulationConfig::default()
+                },
+                ..Config::default()
+            };
+
+            let err = validate_run_config(&cfg).unwrap_err();
+            assert!(err.contains("hgt_base_rate"));
+        }
+    }
+
+    #[test]
+    fn invalid_enabled_hgt_config_is_rejected_before_run_loop() {
+        let invalid = [
+            SimulationConfig {
+                hgt_enabled: true,
+                hgt_interval: 0,
+                ..SimulationConfig::default()
+            },
+            SimulationConfig {
+                hgt_enabled: true,
+                hgt_radius: 0,
+                ..SimulationConfig::default()
+            },
+            SimulationConfig {
+                hgt_enabled: true,
+                hgt_max_events_per_tick: 0,
+                ..SimulationConfig::default()
+            },
+        ];
+
+        for simulation in invalid {
+            let cfg = Config {
+                simulation,
+                ..Config::default()
+            };
+            assert!(validate_run_config(&cfg).is_err());
+        }
+    }
+
+    #[test]
+    fn hgt_probability_treats_nan_and_negative_values_as_zero() {
+        assert_eq!(hgt_accept_probability(f32::NAN, 1.0), 0.0);
+        assert_eq!(hgt_accept_probability(1.0, f32::NAN), 0.0);
+        assert_eq!(hgt_accept_probability(-0.1, 1.0), 0.0);
+        assert_eq!(hgt_accept_probability(1.0, -0.1), 0.0);
+        assert_eq!(hgt_accept_probability(0.75, 4.0), 1.0);
+    }
+
+    #[test]
+    fn hgt_cadence_includes_tick_zero_when_enabled() {
+        let sim = SimulationConfig {
+            hgt_enabled: true,
+            hgt_interval: 10,
+            hgt_base_rate: 0.02,
+            hgt_radius: 1,
+            hgt_max_events_per_tick: 1,
+            ..SimulationConfig::default()
+        };
+
+        assert!(hgt_due(0, &sim));
+        assert!(!hgt_due(1, &sim));
+        assert!(hgt_due(10, &sim));
+    }
+
+    #[test]
+    fn disabled_hgt_phase_is_inactive() {
+        let grid = GridDims { x: 4, y: 4, z: 4 };
+        let mut recipient = make_phototroph([1, 1, 1], 1);
+        for reaction in &mut recipient.ruleset.reactions {
+            reaction.v_max = 0.0;
+        }
+        recipient.ruleset.hgt_propensity = 1.0;
+        let donor = make_chemolithotroph([2, 1, 1], 2);
+        let mut cells = vec![recipient, donor];
+        let cell_map = HashMap::from([([1, 1, 1], 0), ([2, 1, 1], 1)]);
+        let sim = SimulationConfig {
+            hgt_enabled: false,
+            hgt_interval: 1,
+            hgt_base_rate: 1.0,
+            hgt_radius: 1,
+            hgt_max_events_per_tick: 1,
+            ..SimulationConfig::default()
+        };
+        let mut rng = StdRng::seed_from_u64(21);
+
+        let events = run_hgt_phase(0, grid, &mut cells, &cell_map, &sim, &mut rng);
+
+        assert_eq!(events, 0);
+        assert!(
+            cells[0]
+                .ruleset
+                .reactions
+                .iter()
+                .all(|reaction| reaction.v_max == 0.0)
+        );
+    }
+
+    #[test]
+    fn nonfinite_or_negative_hgt_propensity_does_not_transfer() {
+        for propensity in [f32::NAN, f32::INFINITY, -1.0] {
+            let grid = GridDims { x: 4, y: 4, z: 4 };
+            let mut recipient = make_phototroph([1, 1, 1], 1);
+            for reaction in &mut recipient.ruleset.reactions {
+                reaction.v_max = 0.0;
+            }
+            recipient.ruleset.hgt_propensity = propensity;
+            let donor = make_chemolithotroph([2, 1, 1], 2);
+            let mut cells = vec![recipient, donor];
+            let cell_map = HashMap::from([([1, 1, 1], 0), ([2, 1, 1], 1)]);
+            let sim = SimulationConfig {
+                hgt_enabled: true,
+                hgt_interval: 1,
+                hgt_base_rate: 1.0,
+                hgt_radius: 1,
+                hgt_max_events_per_tick: 1,
+                ..SimulationConfig::default()
+            };
+            let mut rng = StdRng::seed_from_u64(23);
+
+            let events = run_hgt_phase(0, grid, &mut cells, &cell_map, &sim, &mut rng);
+
+            assert_eq!(events, 0);
+            assert!(
+                cells[0]
+                    .ruleset
+                    .reactions
+                    .iter()
+                    .all(|reaction| reaction.v_max == 0.0)
+            );
+        }
+    }
+
+    #[test]
+    fn enabled_hgt_phase_transfers_local_reaction() {
+        let grid = GridDims { x: 4, y: 4, z: 4 };
+        let mut recipient = make_phototroph([1, 1, 1], 1);
+        for reaction in &mut recipient.ruleset.reactions {
+            reaction.v_max = 0.0;
+        }
+        recipient.ruleset.hgt_propensity = 1.0;
+        let donor = make_chemolithotroph([2, 1, 1], 2);
+        let donor_reactions = donor.ruleset.reactions.clone();
+        let mut cells = vec![recipient, donor];
+        let cell_map = HashMap::from([([1, 1, 1], 0), ([2, 1, 1], 1)]);
+        let sim = SimulationConfig {
+            hgt_enabled: true,
+            hgt_interval: 1,
+            hgt_base_rate: 1.0,
+            hgt_radius: 1,
+            hgt_max_events_per_tick: 1,
+            ..SimulationConfig::default()
+        };
+        let mut rng = StdRng::seed_from_u64(22);
+
+        let events = run_hgt_phase(0, grid, &mut cells, &cell_map, &sim, &mut rng);
+
+        assert_eq!(events, 1);
+        assert!(cells[0].ruleset.reactions.iter().any(|recipient_reaction| {
+            recipient_reaction.v_max != 0.0
+                && donor_reactions.iter().any(|donor_reaction| {
+                    donor_reaction.substrate == recipient_reaction.substrate
+                        && donor_reaction.product == recipient_reaction.product
+                        && donor_reaction.catalyst == recipient_reaction.catalyst
+                        && donor_reaction.cofactor == recipient_reaction.cofactor
+                        && donor_reaction.v_max == recipient_reaction.v_max
+                })
+        }));
     }
 
     #[test]

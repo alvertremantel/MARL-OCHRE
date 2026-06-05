@@ -157,6 +157,13 @@ pub struct SimulationConfig {
     pub hill_exponent_clamp_high: f32,
     pub active_reaction_threshold: f32,
 
+    // Horizontal gene transfer
+    pub hgt_enabled: bool,
+    pub hgt_interval: u32,
+    pub hgt_radius: u8,
+    pub hgt_base_rate: f32,
+    pub hgt_max_events_per_tick: usize,
+
     // Seeding geometry (canonical 200-layer units)
     pub seed_margin: u16,
     pub phototroph_z_lo: f32,
@@ -222,6 +229,12 @@ impl Default for SimulationConfig {
             hill_exponent_clamp_low: 0.5,
             hill_exponent_clamp_high: 8.0,
             active_reaction_threshold: 1e-9,
+
+            hgt_enabled: false,
+            hgt_interval: 10,
+            hgt_radius: 1,
+            hgt_base_rate: 0.02,
+            hgt_max_events_per_tick: 100,
 
             seed_margin: 5,
             phototroph_z_lo: 0.0,
@@ -588,5 +601,36 @@ mod tests {
         .unwrap();
 
         assert_eq!(cfg.simulation.stoich_enforcement, StoichEnforcement::Strict);
+    }
+
+    #[test]
+    fn hgt_defaults_keep_runtime_disabled() {
+        let sim = SimulationConfig::default();
+        assert!(!sim.hgt_enabled);
+        assert_eq!(sim.hgt_interval, 10);
+        assert_eq!(sim.hgt_radius, 1);
+        assert_eq!(sim.hgt_base_rate, 0.02);
+        assert_eq!(sim.hgt_max_events_per_tick, 100);
+    }
+
+    #[test]
+    fn hgt_config_deserializes_from_toml() {
+        let cfg: Config = toml::from_str(
+            r#"
+            [simulation]
+            hgt_enabled = true
+            hgt_interval = 3
+            hgt_radius = 2
+            hgt_base_rate = 0.5
+            hgt_max_events_per_tick = 7
+            "#,
+        )
+        .unwrap();
+
+        assert!(cfg.simulation.hgt_enabled);
+        assert_eq!(cfg.simulation.hgt_interval, 3);
+        assert_eq!(cfg.simulation.hgt_radius, 2);
+        assert_eq!(cfg.simulation.hgt_base_rate, 0.5);
+        assert_eq!(cfg.simulation.hgt_max_events_per_tick, 7);
     }
 }

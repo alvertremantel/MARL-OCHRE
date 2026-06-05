@@ -181,7 +181,7 @@ impl DataLogger {
             // depth-dependent niches (the Winogradsky hypothesis).
             write!(
                 writer,
-                "tick,population,avg_energy,avg_enzyme_a,avg_enzyme_b,avg_active_rxns,divisions_this_tick,deaths_this_tick"
+                "tick,population,avg_energy,avg_enzyme_a,avg_enzyme_b,avg_active_rxns,divisions_this_tick,deaths_this_tick,hgt_events_this_tick"
             )?;
             for z in 0..grid.z {
                 write!(writer, ",z{}_cells", z)?;
@@ -253,6 +253,7 @@ impl DataLogger {
         cells: &[CellState],
         divisions: u64,
         deaths: u64,
+        hgt_events: u64,
     ) -> Result<()> {
         let Some(writer) = self.ticks_writer.as_mut() else {
             return Ok(());
@@ -308,7 +309,7 @@ impl DataLogger {
         // Write the fixed columns.
         write!(
             writer,
-            "{},{},{:.6},{:.6},{:.6},{:.4},{},{}",
+            "{},{},{:.6},{:.6},{:.6},{:.4},{},{},{}",
             tick,
             cells.len(),
             avg_e,
@@ -316,7 +317,8 @@ impl DataLogger {
             avg_eb,
             avg_rxn,
             divisions,
-            deaths
+            deaths,
+            hgt_events
         )?;
 
         // Write per-z-layer cell counts.
@@ -1107,6 +1109,22 @@ mod tests {
         let v2_events = fs::read_to_string(dir.join("stoich_v2_events.csv")).unwrap();
         assert!(v2_events.contains("tick,stage,kind"));
         assert!(v2_events.contains("reactions,legacy_reaction,123"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tick_log_includes_hgt_event_count() {
+        let out_dir = test_output_dir("marl_output_tick_hgt_test");
+        let mut logger =
+            DataLogger::new(GridDims { x: 2, y: 2, z: 2 }, &out_dir, true, false, false).unwrap();
+
+        logger.log_tick(3, &[], 1, 2, 4).unwrap();
+
+        let dir = PathBuf::from(&out_dir);
+        let ticks = fs::read_to_string(dir.join("ticks.csv")).unwrap();
+        assert!(ticks.contains("deaths_this_tick,hgt_events_this_tick,z0_cells"));
+        assert!(ticks.contains("3,0,0.000000,0.000000,0.000000,0.0000,1,2,4,0,0"));
 
         let _ = fs::remove_dir_all(&dir);
     }

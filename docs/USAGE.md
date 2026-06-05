@@ -180,6 +180,16 @@ Core physics and biology parameters:
 | `hill_exponent_clamp_high` | f32 | 8.0 | Maximum evolvable Hill coefficient |
 | `active_reaction_threshold` | f32 | 1e-9 | Flux threshold below which a reaction slot counts as inactive |
 
+**Horizontal gene transfer:**
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `hgt_enabled` | bool | false | Enables local horizontal gene transfer phase |
+| `hgt_interval` | u32 | 10 | Tick cadence for HGT attempts; tick 0 is eligible when enabled; 0 disables attempts |
+| `hgt_radius` | u8 | 1 | Local cubic voxel radius for possible donors; 1 includes adjacent and diagonal neighbors |
+| `hgt_base_rate` | f32 | 0.02 | Base per-recipient attempt probability multiplied by evolved `hgt_propensity` |
+| `hgt_max_events_per_tick` | usize | 100 | Global cap on successful HGT transfers per tick |
+
 **Seeding geometry:**
 
 | Key | Type | Default | Description |

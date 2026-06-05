@@ -17,7 +17,7 @@ The project has a clean split between environment, cells, orchestration, and out
 - `crates/marl-engine/src/main.rs` ties everything together: seeding, tick order, births, deaths, and output cadence.
 - `crates/marl-output/src/data.rs` and `crates/marl-output/src/snapshot.rs` convert state into files for later analysis.
 - `crates/marl-analysis` and `crates/marl-analyze` provide the canonical headless analysis workflow for completed runs.
-- `crates/marl-engine/src/hgt.rs` contains a horizontal gene transfer primitive that is currently not invoked.
+- `crates/marl-cell/src/hgt.rs` contains the reaction-rule HGT primitive, invoked by the optional local HGT phase in `crates/marl-sim/src/lib.rs`.
 - `crates/marl-output/src/binary_dump.rs` writes raw binary field arrays, compact viewer cell records, and `run_meta.json`.
 - `crates/marl-format/src/lib.rs` owns the shared binary schema (`RunMeta`, `ViewerCellRecord`, field layout constants).
 
@@ -296,7 +296,7 @@ If you want to reacquire context quickly, this is the best reading sequence:
 5. `crates/marl-engine/src/light.rs`
 6. `crates/marl-output/src/data.rs`
 7. `crates/marl-output/src/snapshot.rs`
-8. `crates/marl-engine/src/hgt.rs`
+8. `crates/marl-cell/src/hgt.rs`
 9. `crates/marl-output/src/binary_dump.rs`
 10. `crates/marl-format/src/lib.rs`
 
