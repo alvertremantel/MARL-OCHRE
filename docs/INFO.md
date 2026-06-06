@@ -116,7 +116,7 @@ Cells do not read the chemistry in their own occupied voxel. Instead, they avera
 
 ### 3. Intracellular Reactions
 
-Cells then run their catalytic network. Reactions are Michaelis-Menten-like, optionally use a cofactor, and include a small epsilon background rate to avoid evolutionary dead ends. In non-strict stoichiometry modes, reaction rates are also weighted by descriptor compatibility: substrate/product/cofactor bond energy, work-coupling, and coarse composition make some transformations easier or less efficient than arbitrary slot rewrites. Strict stoichiometry intentionally skips this multiplier so accepted template reactions keep exact template-balanced dynamics. Setting `reaction_descriptor_coupling_strength = 0.0` restores legacy slot-only reaction rates in non-strict modes.
+Cells then run their catalytic network. Reactions are Michaelis-Menten-like, optionally use a cofactor, and include a small epsilon background rate to avoid evolutionary dead ends. In non-strict stoichiometry modes, reaction rates are also weighted by descriptor compatibility: substrate/product/cofactor bond energy, work-coupling, and coarse composition make some transformations easier or less efficient than arbitrary slot rewrites. Poorly coupled non-strict reactions also leak internal energy as heat. Strict stoichiometry intentionally skips these descriptor modifiers so accepted template reactions keep exact template-balanced dynamics. Setting `reaction_descriptor_coupling_strength = 0.0` restores legacy slot-only reaction rates in non-strict modes.
 
 This is a pragmatic research choice rather than a strictly physical one. It makes the search space more navigable for mutation-driven discovery.
 

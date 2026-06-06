@@ -625,6 +625,29 @@ impl CellState {
                     );
                 }
             }
+            if !sim.stoich_enforcement.is_strict() {
+                let requested_leakage =
+                    flux * sim.reaction_descriptor_leak_fraction(sub_idx, prod_idx, rxn.cofactor);
+                let leakage = requested_leakage.min(self.internal[0].max(0.0));
+                self.internal[0] = (self.internal[0] - leakage).max(0.0);
+                if record_full_stoich
+                    && leakage > 0.0
+                    && let Some(ledger) = stoich.as_deref_mut()
+                {
+                    ledger.record(
+                        StoichRecord::new(
+                            StoichStage::Reactions,
+                            StoichEventKind::ReactionLeakage,
+                            leakage,
+                        )
+                        .model_delta(internal_delta(0, -leakage))
+                        .balancing_reservoir(StoichReservoir::HeatSink)
+                        .actor(self.lineage_id)
+                        .species(0),
+                        keep_stoich_events,
+                    );
+                }
+            }
         }
 
         // Maintenance energy drain: each tick, the cell loses lambda_maintenance
@@ -1564,11 +1587,92 @@ mod tests {
         coupled.tick(&[0.0; S_EXT], 1.0, &coupled_sim);
         strict.tick(&[0.0; S_EXT], 1.0, &strict_sim);
 
-        let legacy_flux = legacy.internal[EXT_ENERGY] - 10.0;
-        let coupled_flux = coupled.internal[EXT_ENERGY] - 10.0;
+        let legacy_flux = 10.0 - legacy.internal[EXT_CARBON];
+        let coupled_flux = 10.0 - coupled.internal[EXT_CARBON];
+        let strict_flux = 10.0 - strict.internal[EXT_CARBON];
         let expected_factor = coupled_sim.reaction_descriptor_factor(EXT_CARBON, EXT_ENERGY, 0xFF);
         assert!((coupled_flux - legacy_flux * expected_factor).abs() < 1e-6);
-        assert!((strict.internal[EXT_ENERGY] - legacy.internal[EXT_ENERGY]).abs() < 1e-6);
+        assert!((strict_flux - legacy_flux).abs() < 1e-6);
+    }
+
+    #[test]
+    fn descriptor_reaction_leakage_is_audited_as_heat_loss() {
+        let mut ruleset = test_ruleset();
+        ruleset.reactions[0] = Reaction {
+            substrate: EXT_CARBON as u8,
+            product: 8,
+            catalyst: LIGHT_SPECIES as u8,
+            cofactor: 0xFF,
+            k_m: 1.0,
+            v_max: 0.05,
+            k_cat: 1.0,
+        };
+        let sim = SimulationConfig {
+            lambda_maintenance: 0.0,
+            reaction_maintenance: 0.0,
+            reaction_descriptor_coupling_strength: 1.0,
+            reaction_leakage_strength: 1.0,
+            ..SimulationConfig::default()
+        };
+        let mut cell = test_cell(ruleset);
+        cell.internal[EXT_CARBON] = 10.0;
+        let mut ledger = StoichTickLedger::default();
+
+        cell.tick_with_stoich(&[0.0; S_EXT], 1.0, &sim, Some(&mut ledger), true, true);
+
+        let flux = 10.0 - cell.internal[EXT_CARBON];
+        let expected_leakage = flux * sim.reaction_descriptor_leak_fraction(EXT_CARBON, 8, 0xFF);
+        let event = ledger
+            .events
+            .iter()
+            .find(|event| event.kind == StoichEventKind::ReactionLeakage)
+            .expect("reaction leakage event should be recorded");
+        assert!((event.amount - expected_leakage).abs() < 1e-6);
+        assert!(event.balanced);
+        assert!((event.model_delta.energy + expected_leakage).abs() < 1e-6);
+        assert!((event.reservoir_delta.energy - expected_leakage).abs() < 1e-6);
+    }
+
+    #[test]
+    fn strict_descriptor_reactions_do_not_leak_heat() {
+        let mut ruleset = test_ruleset();
+        ruleset.reactions[0] = Reaction {
+            substrate: 3,
+            product: EXT_ENERGY as u8,
+            catalyst: LIGHT_SPECIES as u8,
+            cofactor: 0xFF,
+            k_m: 1.0,
+            v_max: 0.05,
+            k_cat: 1.0,
+        };
+        let sim = SimulationConfig {
+            lambda_maintenance: 0.0,
+            reaction_maintenance: 0.0,
+            stoich_enforcement: marl_config::stoich::StoichEnforcement::Strict,
+            reaction_descriptor_coupling_strength: 1.0,
+            reaction_leakage_strength: 1.0,
+            ..SimulationConfig::default()
+        };
+        let mut cell = test_cell(ruleset);
+        cell.internal[EXT_ENERGY] = 0.0;
+        cell.internal[3] = 10.0;
+        let mut ledger = StoichTickLedger::default();
+
+        cell.tick_with_stoich(&[0.0; S_EXT], 1.0, &sim, Some(&mut ledger), true, true);
+
+        assert!(
+            ledger
+                .events
+                .iter()
+                .any(|event| event.kind == StoichEventKind::BalancedReaction)
+        );
+        assert!(
+            ledger
+                .events
+                .iter()
+                .all(|event| event.kind != StoichEventKind::ReactionLeakage)
+        );
+        assert!(ledger.reservoir_deltas[StoichReservoir::HeatSink.index()].total_abs_sum() < 1e-6);
     }
 
     #[test]

@@ -106,8 +106,11 @@ model stable.
   stoichiometry deliberately keeps exact template-balanced reaction dynamics and
   skips this descriptor multiplier until the strict template catalog itself is
   descriptor-aware.
+- Reaction heat leakage: poorly coupled non-strict reactions now leak internal
+  energy to heat according to descriptor mismatch. This makes bad chemistry
+  costly without banning it, while keeping material byproduct networks for a
+  later slice.
 
-The next implementation target is reaction leakage and byproducts: descriptor
-compatibility should not only change reaction speed, but also determine how
-much potential becomes useful internal work versus heat, waste, or secreted
-cross-feeding products.
+The next implementation target is material byproducts: descriptor compatibility
+should determine when failed or inefficient reactions produce waste,
+intermediates, or secreted cross-feeding products rather than only heat.

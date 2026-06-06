@@ -44,6 +44,8 @@ transport_composition_cost_weight = 0.5
 reaction_descriptor_coupling_strength = 0.25
 reaction_descriptor_min_factor = 0.25
 reaction_descriptor_max_factor = 1.5
+reaction_leakage_strength = 0.15
+reaction_leakage_max_fraction = 0.5
 
 base_division_prep = 20.0
 prep_maintenance_multiplier = 2.0
