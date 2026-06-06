@@ -156,10 +156,16 @@ model stable.
   default-strength pilot run produced a roughly 515 MiB event log. Before the
   larger 4-seed 48x48x24 sweep, add a summary/counter mode or event filtering
   for calibration-relevant stoichiometry so replicated runs are not mostly I/O.
+- Compact stoichiometry calibration counters: v2 summaries now include
+  reaction-byproduct totals, per-external-species byproduct totals, and
+  reaction-leakage totals. `marl-analyze` can use these compact counters when
+  `stoich_v2_events.csv` is absent, preserving byproduct calibration reports
+  without full row-level event logs. A summary-only 16x16x8, 81-tick smoke run
+  confirmed byproduct/leakage analysis and calibration species reporting with no
+  event CSV.
 
-The next implementation target is stoichiometry event-output reduction for
-calibration: preserve the byproduct/leakage totals and per-species calibration
-signals needed by `marl-analyze`, but avoid writing millions of full event rows
-when a run only needs summary-scale chemistry diagnostics. After that, run the
-larger replicated byproduct sweep and tune defaults or residual chemistry from
-the paired-seed measurements.
+The next implementation target is the larger replicated byproduct sweep using
+compact v2 summaries by default: run four paired seeds across zero, low,
+default, and high byproduct strengths; inspect excess retention, public-pool and
+cross-feeding candidates, paired population effects, and whether organic
+byproduct accumulation remains low after longer evolutionary time.

@@ -1,4 +1,4 @@
-use crate::M_INT;
+use crate::{M_INT, S_EXT};
 
 pub const LIGHT_INTERNAL_SPECIES: usize = M_INT - 1;
 pub const NO_COFACTOR: u8 = 0xFF;
@@ -6,6 +6,7 @@ pub const STRICT_TEMPLATE_NONE: u8 = 0xFF;
 pub const STOICH_TOLERANCE: f32 = 1e-4;
 pub const STOICH_STAGE_COUNT: usize = 11;
 pub const STOICH_RESERVOIR_COUNT: usize = 7;
+pub const STOICH_BYPRODUCT_SPECIES_COUNT: usize = S_EXT;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -303,6 +304,22 @@ pub struct StoichEvent {
     pub balanced: bool,
 }
 
+#[derive(Debug, Clone, Copy, Default, serde::Serialize)]
+pub struct StoichEventKindSummary {
+    pub events: u64,
+    pub amount: f32,
+    pub model_abs: f32,
+    pub residual_abs: f32,
+    pub reservoir_energy: f32,
+}
+
+#[derive(Debug, Clone, Copy, Default, serde::Serialize)]
+pub struct StoichSpeciesEventSummary {
+    pub species_index: i16,
+    pub amount: f32,
+    pub events: u64,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct StoichRecord {
     pub stage: StoichStage,
@@ -400,6 +417,9 @@ pub struct StoichTickLedger {
     pub delta: StoichBudgetDelta,
     pub stage_summaries: [StoichStageSummary; STOICH_STAGE_COUNT],
     pub reservoir_deltas: [StoichBudgetDelta; STOICH_RESERVOIR_COUNT],
+    pub reaction_byproduct: StoichEventKindSummary,
+    pub reaction_byproduct_by_species: [StoichSpeciesEventSummary; STOICH_BYPRODUCT_SPECIES_COUNT],
+    pub reaction_leakage: StoichEventKindSummary,
     pub events: Vec<StoichEvent>,
 }
 
@@ -418,9 +438,37 @@ impl Default for StoichTickLedger {
             delta: StoichBudgetDelta::default(),
             stage_summaries: [StoichStageSummary::default(); STOICH_STAGE_COUNT],
             reservoir_deltas: [StoichBudgetDelta::default(); STOICH_RESERVOIR_COUNT],
+            reaction_byproduct: StoichEventKindSummary::default(),
+            reaction_byproduct_by_species: std::array::from_fn(|i| StoichSpeciesEventSummary {
+                species_index: i as i16,
+                ..StoichSpeciesEventSummary::default()
+            }),
+            reaction_leakage: StoichEventKindSummary::default(),
             events: Vec::new(),
         }
     }
+}
+
+fn record_event_kind_summary(
+    summary: &mut StoichEventKindSummary,
+    amount: f32,
+    model_delta: StoichBudgetDelta,
+    reservoir_delta: StoichBudgetDelta,
+    residual_abs: f32,
+) {
+    summary.events += 1;
+    summary.amount += amount;
+    summary.model_abs += model_delta.total_abs_sum();
+    summary.residual_abs += residual_abs;
+    summary.reservoir_energy += reservoir_delta.energy;
+}
+
+fn add_event_kind_summary(run: &mut StoichEventKindSummary, tick: StoichEventKindSummary) {
+    run.events += tick.events;
+    run.amount += tick.amount;
+    run.model_abs += tick.model_abs;
+    run.residual_abs += tick.residual_abs;
+    run.reservoir_energy += tick.reservoir_energy;
 }
 
 impl StoichTickLedger {
@@ -449,6 +497,31 @@ impl StoichTickLedger {
         }
         if let Some(reservoir) = record.reservoir {
             self.reservoir_deltas[reservoir.index()].add_delta(record.reservoir_delta);
+        }
+        match record.kind {
+            StoichEventKind::ReactionByproduct => {
+                record_event_kind_summary(
+                    &mut self.reaction_byproduct,
+                    record.amount,
+                    record.model_delta,
+                    record.reservoir_delta,
+                    residual_abs,
+                );
+                if let Ok(species) = usize::try_from(record.species_index)
+                    && let Some(summary) = self.reaction_byproduct_by_species.get_mut(species)
+                {
+                    summary.amount += record.amount;
+                    summary.events += 1;
+                }
+            }
+            StoichEventKind::ReactionLeakage => record_event_kind_summary(
+                &mut self.reaction_leakage,
+                record.amount,
+                record.model_delta,
+                record.reservoir_delta,
+                residual_abs,
+            ),
+            _ => {}
         }
         self.delta.add_delta(record.model_delta);
         self.gross_material_abs += record.model_delta.material_abs_sum();
@@ -605,6 +678,9 @@ pub struct StoichRunLedger {
     pub delta: StoichBudgetDelta,
     pub stage_summaries: [StoichStageSummary; STOICH_STAGE_COUNT],
     pub reservoir_deltas: [StoichBudgetDelta; STOICH_RESERVOIR_COUNT],
+    pub reaction_byproduct: StoichEventKindSummary,
+    pub reaction_byproduct_by_species: [StoichSpeciesEventSummary; STOICH_BYPRODUCT_SPECIES_COUNT],
+    pub reaction_leakage: StoichEventKindSummary,
 }
 
 impl Default for StoichRunLedger {
@@ -623,6 +699,12 @@ impl Default for StoichRunLedger {
             delta: StoichBudgetDelta::default(),
             stage_summaries: [StoichStageSummary::default(); STOICH_STAGE_COUNT],
             reservoir_deltas: [StoichBudgetDelta::default(); STOICH_RESERVOIR_COUNT],
+            reaction_byproduct: StoichEventKindSummary::default(),
+            reaction_byproduct_by_species: std::array::from_fn(|i| StoichSpeciesEventSummary {
+                species_index: i as i16,
+                ..StoichSpeciesEventSummary::default()
+            }),
+            reaction_leakage: StoichEventKindSummary::default(),
         }
     }
 }
@@ -653,6 +735,16 @@ impl StoichRunLedger {
         for (run, tick) in self.reservoir_deltas.iter_mut().zip(tick.reservoir_deltas) {
             run.add_delta(tick);
         }
+        add_event_kind_summary(&mut self.reaction_byproduct, tick.reaction_byproduct);
+        for (run, tick) in self
+            .reaction_byproduct_by_species
+            .iter_mut()
+            .zip(tick.reaction_byproduct_by_species)
+        {
+            run.amount += tick.amount;
+            run.events += tick.events;
+        }
+        add_event_kind_summary(&mut self.reaction_leakage, tick.reaction_leakage);
     }
 
     pub fn material_abs_sum(&self) -> f32 {

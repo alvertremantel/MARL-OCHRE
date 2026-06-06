@@ -391,7 +391,9 @@ first, middle, and latest binary snapshots. Use `--all-snapshots`,
 `--no-rulesets` when full ruleset sidecars are unavailable or not needed.
 When `stoich_v2_summary.json` is present, the same reports include v2
 stoichiometry metadata. Descriptor-driven `reaction_byproduct` and
-`reaction_leakage` amounts require `stoich_v2_events.csv`.
+`reaction_leakage` totals are read from the compact v2 summary when available;
+`stoich_v2_events.csv` is only required for row-level event audits or older
+runs whose summaries predate the compact calibration counters.
 
 When full ruleset sidecars are available, `marl-analyze` also reports
 transporter ecology:

@@ -1374,12 +1374,13 @@ fn read_stoich_v2_analysis(run_dir: &Path) -> AnalysisResult<Option<StoichV2Anal
     let summary_path = run_dir.join("stoich_v2_summary.json");
     let events_path = run_dir.join("stoich_v2_events.csv");
     let summary_present = summary_path.exists();
-    let events_present = events_path.exists();
-    if !summary_present && !events_present {
+    let csv_events_present = events_path.exists();
+    if !summary_present && !csv_events_present {
         return Ok(None);
     }
 
-    let (total_ticks, enforcement, gross_residual_abs_sum) = if summary_present {
+    let (total_ticks, enforcement, gross_residual_abs_sum, summary_accumulator) = if summary_present
+    {
         let text = fs::read_to_string(&summary_path)?;
         let value: serde_json::Value = serde_json::from_str(&text)?;
         (
@@ -1391,15 +1392,18 @@ fn read_stoich_v2_analysis(run_dir: &Path) -> AnalysisResult<Option<StoichV2Anal
             value
                 .get("gross_residual_abs_sum")
                 .and_then(|value| value.as_f64()),
+            parse_stoich_v2_summary_accumulator(&value),
         )
     } else {
-        (None, None, None)
+        (None, None, None, None)
     };
+    let summary_events_present = summary_accumulator.is_some();
+    let events_present = csv_events_present || summary_events_present;
 
-    let accumulator = if events_present {
+    let accumulator = if csv_events_present {
         parse_stoich_v2_events(&fs::read_to_string(&events_path)?)?
     } else {
-        StoichV2EventAccumulator::default()
+        summary_accumulator.unwrap_or_default()
     };
 
     let mut byproduct_by_species = accumulator
@@ -1425,6 +1429,106 @@ fn read_stoich_v2_analysis(run_dir: &Path) -> AnalysisResult<Option<StoichV2Anal
         reaction_leakage_amount: accumulator.leakage.amount,
         reaction_leakage_energy_to_heat: accumulator.leakage.reservoir_energy,
     }))
+}
+
+fn parse_stoich_v2_summary_accumulator(
+    value: &serde_json::Value,
+) -> Option<StoichV2EventAccumulator> {
+    let ledger = value.get("ledger")?;
+    let byproduct = ledger.get("reaction_byproduct")?;
+    let leakage = ledger.get("reaction_leakage")?;
+    let mut accumulator = StoichV2EventAccumulator::default();
+    accumulator.total_events = value
+        .get("stages")
+        .and_then(|stages| stages.as_array())
+        .map(|stages| {
+            stages
+                .iter()
+                .filter_map(|stage| stage.get("summary"))
+                .filter_map(|summary| summary.get("event_count"))
+                .filter_map(|count| count.as_u64())
+                .sum()
+        })
+        .unwrap_or(0);
+    accumulator.imbalanced_events = value
+        .get("stages")
+        .and_then(|stages| stages.as_array())
+        .map(|stages| {
+            stages
+                .iter()
+                .filter_map(|stage| stage.get("summary"))
+                .filter_map(|summary| summary.get("imbalanced_event_count"))
+                .filter_map(|count| count.as_u64())
+                .sum()
+        })
+        .unwrap_or(0);
+    accumulator.byproduct.events = byproduct
+        .get("events")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0);
+    accumulator.byproduct.amount = byproduct
+        .get("amount")
+        .and_then(|value| value.as_f64())
+        .unwrap_or(0.0);
+    accumulator.byproduct.model_abs = byproduct
+        .get("model_abs")
+        .and_then(|value| value.as_f64())
+        .unwrap_or(0.0);
+    accumulator.byproduct.residual_abs = byproduct
+        .get("residual_abs")
+        .and_then(|value| value.as_f64())
+        .unwrap_or(0.0);
+    accumulator.leakage.events = leakage
+        .get("events")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0);
+    accumulator.leakage.amount = leakage
+        .get("amount")
+        .and_then(|value| value.as_f64())
+        .unwrap_or(0.0);
+    accumulator.leakage.model_abs = leakage
+        .get("model_abs")
+        .and_then(|value| value.as_f64())
+        .unwrap_or(0.0);
+    accumulator.leakage.residual_abs = leakage
+        .get("residual_abs")
+        .and_then(|value| value.as_f64())
+        .unwrap_or(0.0);
+    accumulator.leakage.reservoir_energy = leakage
+        .get("reservoir_energy")
+        .and_then(|value| value.as_f64())
+        .unwrap_or(0.0);
+
+    if let Some(species) = ledger
+        .get("reaction_byproduct_by_species")
+        .and_then(|value| value.as_array())
+    {
+        for entry in species {
+            let Some(events) = entry.get("events").and_then(|value| value.as_u64()) else {
+                continue;
+            };
+            if events == 0 {
+                continue;
+            }
+            let species_index = entry
+                .get("species_index")
+                .and_then(|value| value.as_i64())
+                .unwrap_or(-1) as i16;
+            accumulator.byproduct_by_species.insert(
+                species_index,
+                StoichSpeciesEventSummary {
+                    species_index,
+                    amount: entry
+                        .get("amount")
+                        .and_then(|value| value.as_f64())
+                        .unwrap_or(0.0),
+                    events,
+                },
+            );
+        }
+    }
+
+    Some(accumulator)
 }
 
 fn parse_stoich_v2_events(text: &str) -> AnalysisResult<StoichV2EventAccumulator> {
@@ -4354,6 +4458,73 @@ mod tests {
 
         let _ = fs::remove_dir_all(&no_stoich_dir);
         let _ = fs::remove_dir_all(&summary_only_dir);
+    }
+
+    #[test]
+    fn stoich_v2_analysis_uses_summary_calibration_totals_without_event_csv() {
+        let dir = test_dir("marl_analysis_summary_stoich_totals");
+        fs::write(
+            dir.join("stoich_v2_summary.json"),
+            r#"{
+                "schema_version": 2,
+                "total_ticks": 8,
+                "enforcement": "audit",
+                "ledger": {
+                    "reaction_byproduct": {
+                        "events": 3,
+                        "amount": 1.25,
+                        "model_abs": 0.5,
+                        "residual_abs": 0.0,
+                        "reservoir_energy": 0.0
+                    },
+                    "reaction_byproduct_by_species": [
+                        { "species_index": 0, "amount": 0.0, "events": 0 },
+                        { "species_index": 4, "amount": 1.25, "events": 3 }
+                    ],
+                    "reaction_leakage": {
+                        "events": 2,
+                        "amount": 0.75,
+                        "model_abs": 0.75,
+                        "residual_abs": 0.0,
+                        "reservoir_energy": 0.75
+                    }
+                },
+                "stages": [
+                    {
+                        "stage": "reactions",
+                        "summary": {
+                            "event_count": 9,
+                            "strict_rejection_count": 0,
+                            "imbalanced_event_count": 1,
+                            "gross_model_abs": 0.0,
+                            "gross_reservoir_abs": 0.0,
+                            "gross_residual_abs": 0.0,
+                            "net_model_delta": { "c": 0.0, "h": 0.0, "o": 0.0, "s": 0.0, "redox": 0.0, "energy": 0.0 },
+                            "net_reservoir_delta": { "c": 0.0, "h": 0.0, "o": 0.0, "s": 0.0, "redox": 0.0, "energy": 0.0 }
+                        }
+                    }
+                ],
+                "gross_residual_abs_sum": 0.0
+            }"#,
+        )
+        .unwrap();
+
+        let analysis = read_stoich_v2_analysis(&dir)
+            .unwrap()
+            .expect("summary-only compact stoich totals should be available");
+
+        assert!(analysis.summary_present);
+        assert!(analysis.events_present);
+        assert_eq!(analysis.total_events, 9);
+        assert_eq!(analysis.imbalanced_events, 1);
+        assert_eq!(analysis.reaction_byproduct_events, 3);
+        assert!((analysis.reaction_byproduct_amount - 1.25).abs() < 1e-9);
+        assert_eq!(analysis.reaction_byproduct_by_species.len(), 1);
+        assert_eq!(analysis.reaction_byproduct_by_species[0].species_index, 4);
+        assert_eq!(analysis.reaction_leakage_events, 2);
+        assert!((analysis.reaction_leakage_energy_to_heat - 0.75).abs() < 1e-9);
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
