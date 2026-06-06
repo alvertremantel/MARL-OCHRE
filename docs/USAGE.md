@@ -357,6 +357,10 @@ Compare runs:
 cargo run -p marl-analyze -- compare output/run_a output/run_b --out-dir output/compare_a_b
 ```
 
+When compared runs include v2 event rows, the comparison report includes
+reaction-byproduct and reaction-leakage totals so chemistry calibration sweeps
+can be inspected headlessly.
+
 By default, analysis reads the full `ticks.csv` trajectory and samples the
 first, middle, and latest binary snapshots. Use `--all-snapshots`,
 `--latest-only`, or `--ticks 0,500,5000` to change that policy. Use

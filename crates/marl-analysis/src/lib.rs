@@ -81,6 +81,12 @@ pub struct RunComparisonEntry {
     pub genotype_dominant_fraction: Option<f64>,
     pub transporter_active_per_cell: Option<f64>,
     pub transporter_gated_slots: Option<u64>,
+    pub stoich_total_events: Option<u64>,
+    pub stoich_imbalanced_events: Option<u64>,
+    pub reaction_byproduct_events: Option<u64>,
+    pub reaction_byproduct_amount: Option<f64>,
+    pub reaction_leakage_events: Option<u64>,
+    pub reaction_leakage_energy_to_heat: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -719,7 +725,7 @@ pub fn render_comparison_terminal(analysis: &ComparisonAnalysis) -> String {
     out.push_str("MARL run comparison\n");
     for run in &analysis.runs {
         out.push_str(&format!(
-            "  {}: final_pop={:?}, growth={:?}, top={:?}, dominant_genotype={:?}, active_transporters={:?}\n",
+            "  {}: final_pop={:?}, growth={:?}, top={:?}, dominant_genotype={:?}, active_transporters={:?}, byproduct={}, leakage_heat={}\n",
             run.name,
             run.final_population,
             run.growth_factor.map(|v| format!("{v:.2}x")),
@@ -727,7 +733,13 @@ pub fn render_comparison_terminal(analysis: &ComparisonAnalysis) -> String {
             run.genotype_dominant_fraction
                 .map(|v| format!("{:.1}%", v * 100.0)),
             run.transporter_active_per_cell
-                .map(|v| format!("{v:.2}/cell"))
+                .map(|v| format!("{v:.2}/cell")),
+            run.reaction_byproduct_amount
+                .map(|value| format!("{value:.4}"))
+                .unwrap_or_else(|| "n/a".to_string()),
+            run.reaction_leakage_energy_to_heat
+                .map(|value| format!("{value:.4}"))
+                .unwrap_or_else(|| "n/a".to_string())
         ));
     }
     for finding in &analysis.findings {
@@ -1066,6 +1078,27 @@ pub fn render_comparison_markdown(analysis: &ComparisonAnalysis) -> String {
                 .map(|v| v.to_string())
                 .unwrap_or_else(|| "n/a".to_string())
         ));
+    }
+    if analysis
+        .runs
+        .iter()
+        .any(|run| run.stoich_total_events.is_some())
+    {
+        out.push_str("\n## Stoichiometry V2 Comparison\n\n");
+        out.push_str("| run | events | imbalanced | byproduct_events | byproduct_amount | leakage_events | leakage_heat |\n");
+        out.push_str("|---|---:|---:|---:|---:|---:|---:|\n");
+        for run in &analysis.runs {
+            out.push_str(&format!(
+                "| {} | {} | {} | {} | {} | {} | {} |\n",
+                run.name,
+                display_opt_u64(run.stoich_total_events),
+                display_opt_u64(run.stoich_imbalanced_events),
+                display_opt_u64(run.reaction_byproduct_events),
+                display_opt_f64(run.reaction_byproduct_amount),
+                display_opt_u64(run.reaction_leakage_events),
+                display_opt_f64(run.reaction_leakage_energy_to_heat)
+            ));
+        }
     }
     out.push_str("\n## Findings\n\n");
     if analysis.findings.is_empty() {
@@ -2159,6 +2192,10 @@ fn classify_comparison_findings(runs: &[RunComparisonEntry]) -> Vec<Finding> {
 
 impl RunComparisonEntry {
     fn from_analysis(analysis: &RunAnalysis) -> Self {
+        let event_stoich = analysis
+            .stoich_v2
+            .as_ref()
+            .filter(|stoich| stoich.events_present);
         Self {
             name: run_name(&analysis.run_dir),
             run_dir: analysis.run_dir.clone(),
@@ -2206,6 +2243,13 @@ impl RunComparisonEntry {
                 .rulesets
                 .as_ref()
                 .map(|rulesets| rulesets.transporters.gated_slots),
+            stoich_total_events: event_stoich.map(|stoich| stoich.total_events),
+            stoich_imbalanced_events: event_stoich.map(|stoich| stoich.imbalanced_events),
+            reaction_byproduct_events: event_stoich.map(|stoich| stoich.reaction_byproduct_events),
+            reaction_byproduct_amount: event_stoich.map(|stoich| stoich.reaction_byproduct_amount),
+            reaction_leakage_events: event_stoich.map(|stoich| stoich.reaction_leakage_events),
+            reaction_leakage_energy_to_heat: event_stoich
+                .map(|stoich| stoich.reaction_leakage_energy_to_heat),
         }
     }
 }
@@ -2651,6 +2695,47 @@ mod tests {
         assert!(markdown.contains("| tick | ext3->int4 | ext1->int2 |"));
         assert!(markdown.contains("| 0 | - | 4 (g2) |"));
         assert!(markdown.contains("| 10 | 6 (g3) | 2 (g1) |"));
+    }
+
+    #[test]
+    fn comparison_reports_include_stoich_v2_metrics() {
+        let run = |name: &str, byproduct: Option<f64>| RunComparisonEntry {
+            name: name.to_string(),
+            run_dir: PathBuf::from(format!("/tmp/{name}")),
+            final_population: Some(10),
+            max_population: Some(12),
+            growth_factor: Some(1.2),
+            final_avg_energy: Some(0.5),
+            top_fraction: Some(0.4),
+            middle_fraction: Some(0.5),
+            deep_fraction: Some(0.1),
+            genotype_unique_count: None,
+            genotype_dominant_fraction: None,
+            transporter_active_per_cell: None,
+            transporter_gated_slots: None,
+            stoich_total_events: byproduct.map(|_| 100),
+            stoich_imbalanced_events: byproduct.map(|_| 3),
+            reaction_byproduct_events: byproduct.map(|_| 7),
+            reaction_byproduct_amount: byproduct,
+            reaction_leakage_events: byproduct.map(|_| 11),
+            reaction_leakage_energy_to_heat: byproduct.map(|value| value / 2.0),
+        };
+        let analysis = ComparisonAnalysis {
+            runs: vec![run("with_events", Some(2.5)), run("without_events", None)],
+            findings: Vec::new(),
+            warnings: Vec::new(),
+        };
+
+        let terminal = render_comparison_terminal(&analysis);
+        let markdown = render_comparison_markdown(&analysis);
+
+        assert!(terminal.contains("byproduct=2.5000"));
+        assert!(terminal.contains("leakage_heat=1.2500"));
+        assert!(terminal.contains("without_events:"));
+        assert!(terminal.contains("byproduct=n/a"));
+        assert!(markdown.contains("## Stoichiometry V2 Comparison"));
+        assert!(markdown.contains("| with_events | 100 | 3 | 7 | 2.500 | 11 | 1.250 |"));
+        assert!(markdown.contains("| without_events | n/a | n/a | n/a | n/a | n/a | n/a |"));
     }
 
     #[test]
