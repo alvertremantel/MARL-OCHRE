@@ -114,7 +114,10 @@ model stable.
   descriptor-based at a coarse level: signal-like chemistry goes to signal
   pools, structural/storage-heavy chemistry goes to structural material, and
   most carbon/lipid/toxin-bearing failures become organic waste.
+- Byproduct analysis: `marl-analyze` now reads v2 stoichiometry events when
+  available and reports reaction-byproduct and heat-leakage totals in terminal,
+  Markdown, and JSON reports.
 
-The next implementation target is byproduct calibration and analysis: quantify
-when these routed byproducts create cross-feeding versus runaway public goods,
-then expose reaction-byproduct summaries in the CLI analysis reports.
+The next implementation target is byproduct calibration: quantify when these
+routed byproducts create cross-feeding versus runaway public goods, then use
+those measurements to tune defaults or add richer explicit residual chemistry.

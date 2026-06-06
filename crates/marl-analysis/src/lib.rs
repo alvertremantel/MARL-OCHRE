@@ -54,6 +54,7 @@ pub struct RunAnalysis {
     pub rulesets: Option<RulesetSummary>,
     pub ruleset_timeline: Vec<RulesetSummary>,
     pub transporter_pair_timeline: Vec<TransportPairTimeline>,
+    pub stoich_v2: Option<StoichV2Analysis>,
     pub findings: Vec<Finding>,
     pub warnings: Vec<String>,
 }
@@ -250,6 +251,50 @@ pub struct TransportPairTimelinePoint {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct StoichV2Analysis {
+    pub summary_present: bool,
+    pub events_present: bool,
+    pub total_ticks: Option<u64>,
+    pub enforcement: Option<String>,
+    pub gross_residual_abs_sum: Option<f64>,
+    pub total_events: u64,
+    pub imbalanced_events: u64,
+    pub reaction_byproduct_events: u64,
+    pub reaction_byproduct_amount: f64,
+    pub reaction_byproduct_model_abs: f64,
+    pub reaction_byproduct_residual_abs: f64,
+    pub reaction_byproduct_by_species: Vec<StoichSpeciesEventSummary>,
+    pub reaction_leakage_events: u64,
+    pub reaction_leakage_amount: f64,
+    pub reaction_leakage_energy_to_heat: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct StoichSpeciesEventSummary {
+    pub species_index: i16,
+    pub amount: f64,
+    pub events: u64,
+}
+
+#[derive(Debug, Clone, Default)]
+struct StoichEventKindAccumulator {
+    events: u64,
+    amount: f64,
+    model_abs: f64,
+    residual_abs: f64,
+    reservoir_energy: f64,
+}
+
+#[derive(Debug, Clone, Default)]
+struct StoichV2EventAccumulator {
+    total_events: u64,
+    imbalanced_events: u64,
+    byproduct: StoichEventKindAccumulator,
+    leakage: StoichEventKindAccumulator,
+    byproduct_by_species: HashMap<i16, StoichSpeciesEventSummary>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct Finding {
     pub id: String,
     pub level: FindingLevel,
@@ -380,6 +425,13 @@ pub fn analyze_run(run_dir: impl AsRef<Path>, cfg: &AnalysisConfig) -> AnalysisR
     }
     let rulesets = ruleset_timeline.last().cloned();
     let transporter_pair_timeline = summarize_transporter_pair_timeline(&ruleset_timeline);
+    let stoich_v2 = match read_stoich_v2_analysis(run_dir) {
+        Ok(summary) => summary,
+        Err(err) => {
+            warnings.push(format!("stoich v2 analysis skipped: {err}"));
+            None
+        }
+    };
 
     let mut analysis = RunAnalysis {
         run_dir: run_dir.to_path_buf(),
@@ -394,6 +446,7 @@ pub fn analyze_run(run_dir: impl AsRef<Path>, cfg: &AnalysisConfig) -> AnalysisR
         rulesets,
         ruleset_timeline,
         transporter_pair_timeline,
+        stoich_v2,
         findings: Vec::new(),
         warnings,
     };
@@ -572,6 +625,37 @@ pub fn render_run_terminal(analysis: &RunAnalysis) -> String {
                 .collect::<Vec<_>>()
                 .join(", ");
             out.push_str(&format!("  common transporter pairs: {pairs}\n"));
+        }
+    }
+    if let Some(stoich) = &analysis.stoich_v2 {
+        if stoich.events_present {
+            out.push_str(&format!(
+                "  stoich v2: events={}, imbalanced={}, byproduct {:.4} in {} events, leakage {:.4} to heat\n",
+                stoich.total_events,
+                stoich.imbalanced_events,
+                stoich.reaction_byproduct_amount,
+                stoich.reaction_byproduct_events,
+                stoich.reaction_leakage_energy_to_heat
+            ));
+            if !stoich.reaction_byproduct_by_species.is_empty() {
+                let species = stoich
+                    .reaction_byproduct_by_species
+                    .iter()
+                    .map(|summary| {
+                        format!(
+                            "ext{}:{:.4}/{}",
+                            summary.species_index, summary.amount, summary.events
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                out.push_str(&format!("  reaction byproducts by species: {species}\n"));
+            }
+        } else {
+            out.push_str(&format!(
+                "  stoich v2: summary present={}, event-level reaction totals unavailable\n",
+                stoich.summary_present
+            ));
         }
     }
     if analysis.ruleset_timeline.len() > 1 {
@@ -888,6 +972,52 @@ pub fn render_run_markdown(analysis: &RunAnalysis) -> String {
             out.push('\n');
         }
     }
+    if let Some(stoich) = &analysis.stoich_v2 {
+        out.push_str("\n## Stoichiometry V2\n\n");
+        out.push_str(&format!(
+            "- Summary present: {}\n- Events present: {}\n- Total ticks: {}\n- Enforcement: {}\n- Total events: {}\n- Imbalanced events: {}\n- Gross residual abs sum: {}\n",
+            stoich.summary_present,
+            stoich.events_present,
+            stoich
+                .total_ticks
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "n/a".to_string()),
+            stoich.enforcement.as_deref().unwrap_or("n/a"),
+            stoich.total_events,
+            stoich.imbalanced_events,
+            stoich
+                .gross_residual_abs_sum
+                .map(|value| format!("{value:.6}"))
+                .unwrap_or_else(|| "n/a".to_string())
+        ));
+        if stoich.events_present {
+            out.push_str(&format!(
+                "- Reaction byproducts: {} events, amount {:.6}, model_abs {:.6}, residual_abs {:.6}\n- Reaction leakage: {} events, amount {:.6}, heat energy {:.6}\n",
+                stoich.reaction_byproduct_events,
+                stoich.reaction_byproduct_amount,
+                stoich.reaction_byproduct_model_abs,
+                stoich.reaction_byproduct_residual_abs,
+                stoich.reaction_leakage_events,
+                stoich.reaction_leakage_amount,
+                stoich.reaction_leakage_energy_to_heat
+            ));
+            if !stoich.reaction_byproduct_by_species.is_empty() {
+                out.push_str("\n### Reaction Byproducts By Species\n\n");
+                out.push_str("| species | events | amount |\n");
+                out.push_str("|---:|---:|---:|\n");
+                for species in &stoich.reaction_byproduct_by_species {
+                    out.push_str(&format!(
+                        "| {} | {} | {:.6} |\n",
+                        species.species_index, species.events, species.amount
+                    ));
+                }
+            }
+        } else {
+            out.push_str(
+                "- Event-level reaction byproduct/leakage totals: unavailable (`stoich_v2_events.csv` not present)\n",
+            );
+        }
+    }
     out.push_str("\n## Findings\n\n");
     if analysis.findings.is_empty() {
         out.push_str("- No major automated findings.\n");
@@ -983,6 +1113,157 @@ fn sample_ticks(available: &[u64]) -> Vec<u64> {
     ticks.sort_unstable();
     ticks.dedup();
     ticks
+}
+
+fn read_stoich_v2_analysis(run_dir: &Path) -> AnalysisResult<Option<StoichV2Analysis>> {
+    let summary_path = run_dir.join("stoich_v2_summary.json");
+    let events_path = run_dir.join("stoich_v2_events.csv");
+    let summary_present = summary_path.exists();
+    let events_present = events_path.exists();
+    if !summary_present && !events_present {
+        return Ok(None);
+    }
+
+    let (total_ticks, enforcement, gross_residual_abs_sum) = if summary_present {
+        let text = fs::read_to_string(&summary_path)?;
+        let value: serde_json::Value = serde_json::from_str(&text)?;
+        (
+            value.get("total_ticks").and_then(|value| value.as_u64()),
+            value
+                .get("enforcement")
+                .and_then(|value| value.as_str())
+                .map(str::to_owned),
+            value
+                .get("gross_residual_abs_sum")
+                .and_then(|value| value.as_f64()),
+        )
+    } else {
+        (None, None, None)
+    };
+
+    let accumulator = if events_present {
+        parse_stoich_v2_events(&fs::read_to_string(&events_path)?)?
+    } else {
+        StoichV2EventAccumulator::default()
+    };
+
+    let mut byproduct_by_species = accumulator
+        .byproduct_by_species
+        .into_values()
+        .collect::<Vec<_>>();
+    byproduct_by_species.sort_by_key(|summary| summary.species_index);
+
+    Ok(Some(StoichV2Analysis {
+        summary_present,
+        events_present,
+        total_ticks,
+        enforcement,
+        gross_residual_abs_sum,
+        total_events: accumulator.total_events,
+        imbalanced_events: accumulator.imbalanced_events,
+        reaction_byproduct_events: accumulator.byproduct.events,
+        reaction_byproduct_amount: accumulator.byproduct.amount,
+        reaction_byproduct_model_abs: accumulator.byproduct.model_abs,
+        reaction_byproduct_residual_abs: accumulator.byproduct.residual_abs,
+        reaction_byproduct_by_species: byproduct_by_species,
+        reaction_leakage_events: accumulator.leakage.events,
+        reaction_leakage_amount: accumulator.leakage.amount,
+        reaction_leakage_energy_to_heat: accumulator.leakage.reservoir_energy,
+    }))
+}
+
+fn parse_stoich_v2_events(text: &str) -> AnalysisResult<StoichV2EventAccumulator> {
+    let mut lines = text.lines();
+    let header = lines.next().ok_or("stoich_v2_events.csv is empty")?;
+    let columns: Vec<&str> = header.split(',').collect();
+    let index = |name: &str| -> AnalysisResult<usize> {
+        columns
+            .iter()
+            .position(|column| *column == name)
+            .ok_or_else(|| format!("stoich_v2_events.csv missing column {name}").into())
+    };
+    let kind_i = index("kind")?;
+    let species_i = index("species_index")?;
+    let amount_i = index("amount")?;
+    let model_c_i = index("model_c")?;
+    let model_h_i = index("model_h")?;
+    let model_o_i = index("model_o")?;
+    let model_s_i = index("model_s")?;
+    let model_redox_i = index("model_redox")?;
+    let model_energy_i = index("model_energy")?;
+    let reservoir_energy_i = index("reservoir_energy")?;
+    let residual_abs_i = index("residual_abs")?;
+    let balanced_i = index("balanced")?;
+
+    let mut accumulator = StoichV2EventAccumulator::default();
+    for (line_no, line) in lines.enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let values: Vec<&str> = line.split(',').collect();
+        let get = |i: usize| -> AnalysisResult<&str> {
+            values.get(i).copied().ok_or_else(|| {
+                format!(
+                    "stoich_v2_events.csv line {} missing column {}",
+                    line_no + 2,
+                    i
+                )
+                .into()
+            })
+        };
+        let kind = get(kind_i)?;
+        let species_index = get(species_i)?.parse::<i16>()?;
+        let amount = get(amount_i)?.parse::<f64>()?;
+        let model_abs = [
+            model_c_i,
+            model_h_i,
+            model_o_i,
+            model_s_i,
+            model_redox_i,
+            model_energy_i,
+        ]
+        .into_iter()
+        .map(|i| get(i).and_then(|value| value.parse::<f64>().map_err(|e| e.into())))
+        .collect::<AnalysisResult<Vec<_>>>()?
+        .into_iter()
+        .map(f64::abs)
+        .sum::<f64>();
+        let reservoir_energy = get(reservoir_energy_i)?.parse::<f64>()?;
+        let residual_abs = get(residual_abs_i)?.parse::<f64>()?;
+        let balanced = get(balanced_i)?.parse::<u8>()? != 0;
+
+        accumulator.total_events += 1;
+        if !balanced {
+            accumulator.imbalanced_events += 1;
+        }
+        match kind {
+            "reaction_byproduct" => {
+                accumulator.byproduct.events += 1;
+                accumulator.byproduct.amount += amount;
+                accumulator.byproduct.model_abs += model_abs;
+                accumulator.byproduct.residual_abs += residual_abs;
+                let species_summary = accumulator
+                    .byproduct_by_species
+                    .entry(species_index)
+                    .or_insert(StoichSpeciesEventSummary {
+                        species_index,
+                        amount: 0.0,
+                        events: 0,
+                    });
+                species_summary.amount += amount;
+                species_summary.events += 1;
+            }
+            "reaction_leakage" => {
+                accumulator.leakage.events += 1;
+                accumulator.leakage.amount += amount;
+                accumulator.leakage.model_abs += model_abs;
+                accumulator.leakage.residual_abs += residual_abs;
+                accumulator.leakage.reservoir_energy += reservoir_energy;
+            }
+            _ => {}
+        }
+    }
+    Ok(accumulator)
 }
 
 fn read_ticks_csv(run_dir: &Path) -> AnalysisResult<Vec<TickRow>> {
@@ -2359,6 +2640,7 @@ mod tests {
             rulesets: ruleset_timeline.last().cloned(),
             transporter_pair_timeline: summarize_transporter_pair_timeline(&ruleset_timeline),
             ruleset_timeline,
+            stoich_v2: None,
             findings: Vec::new(),
             warnings: Vec::new(),
         };
@@ -2369,6 +2651,147 @@ mod tests {
         assert!(markdown.contains("| tick | ext3->int4 | ext1->int2 |"));
         assert!(markdown.contains("| 0 | - | 4 (g2) |"));
         assert!(markdown.contains("| 10 | 6 (g3) | 2 (g1) |"));
+    }
+
+    #[test]
+    fn stoich_v2_events_report_reaction_byproducts_and_leakage() {
+        let events = "tick,stage,kind,actor_id,species_index,template_id,amount,model_c,model_h,model_o,model_s,model_redox,model_energy,reservoir_c,reservoir_h,reservoir_o,reservoir_s,reservoir_redox,reservoir_energy,residual_abs,balanced\n\
+0,reactions,reaction_byproduct,7,4,255,0.500000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,1\n\
+1,reactions,reaction_byproduct,8,7,255,0.250000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,1\n\
+1,reactions,reaction_leakage,8,0,255,0.125000,0.000000,0.000000,0.000000,0.000000,0.000000,-0.125000,0.000000,0.000000,0.000000,0.000000,0.000000,0.125000,0.000000,1\n";
+
+        let summary = parse_stoich_v2_events(events).unwrap();
+
+        assert_eq!(summary.total_events, 3);
+        assert_eq!(summary.imbalanced_events, 0);
+        assert_eq!(summary.byproduct.events, 2);
+        assert!((summary.byproduct.amount - 0.75).abs() < 1e-9);
+        assert_eq!(summary.leakage.events, 1);
+        assert!((summary.leakage.reservoir_energy - 0.125).abs() < 1e-9);
+
+        let analysis = RunAnalysis {
+            run_dir: PathBuf::from("/tmp/example_run"),
+            grid: [1, 1, 1],
+            available_ticks: Vec::new(),
+            sampled_ticks: Vec::new(),
+            trajectory: None,
+            zonation: None,
+            cells: None,
+            cell_timeline: Vec::new(),
+            chemistry: Vec::new(),
+            rulesets: None,
+            ruleset_timeline: Vec::new(),
+            transporter_pair_timeline: Vec::new(),
+            stoich_v2: Some(StoichV2Analysis {
+                summary_present: false,
+                events_present: true,
+                total_ticks: None,
+                enforcement: None,
+                gross_residual_abs_sum: None,
+                total_events: summary.total_events,
+                imbalanced_events: summary.imbalanced_events,
+                reaction_byproduct_events: summary.byproduct.events,
+                reaction_byproduct_amount: summary.byproduct.amount,
+                reaction_byproduct_model_abs: summary.byproduct.model_abs,
+                reaction_byproduct_residual_abs: summary.byproduct.residual_abs,
+                reaction_byproduct_by_species: summary.byproduct_by_species.into_values().collect(),
+                reaction_leakage_events: summary.leakage.events,
+                reaction_leakage_amount: summary.leakage.amount,
+                reaction_leakage_energy_to_heat: summary.leakage.reservoir_energy,
+            }),
+            findings: Vec::new(),
+            warnings: Vec::new(),
+        };
+        let terminal = render_run_terminal(&analysis);
+        let markdown = render_run_markdown(&analysis);
+
+        assert!(terminal.contains("byproduct 0.7500 in 2 events"));
+        assert!(terminal.contains("leakage 0.1250 to heat"));
+        assert!(markdown.contains("## Stoichiometry V2"));
+        assert!(markdown.contains("| 4 | 1 | 0.500000 |"));
+    }
+
+    #[test]
+    fn stoich_v2_analysis_handles_missing_and_summary_only_files() {
+        let no_stoich_dir = PathBuf::from("/tmp/marl_analysis_no_stoich_v2_test");
+        let _ = fs::remove_dir_all(&no_stoich_dir);
+        fs::create_dir_all(&no_stoich_dir).unwrap();
+        assert!(read_stoich_v2_analysis(&no_stoich_dir).unwrap().is_none());
+
+        let summary_only_dir = PathBuf::from("/tmp/marl_analysis_summary_only_stoich_v2_test");
+        let _ = fs::remove_dir_all(&summary_only_dir);
+        fs::create_dir_all(&summary_only_dir).unwrap();
+        fs::write(
+            summary_only_dir.join("stoich_v2_summary.json"),
+            r#"{
+                "schema_version": 2,
+                "total_ticks": 5,
+                "enforcement": "audit",
+                "gross_residual_abs_sum": 1.25
+            }"#,
+        )
+        .unwrap();
+
+        let summary = read_stoich_v2_analysis(&summary_only_dir)
+            .unwrap()
+            .expect("summary-only stoich analysis should be present");
+        assert!(summary.summary_present);
+        assert!(!summary.events_present);
+        assert_eq!(summary.total_ticks, Some(5));
+        assert_eq!(summary.enforcement.as_deref(), Some("audit"));
+        assert_eq!(summary.gross_residual_abs_sum, Some(1.25));
+
+        let analysis = RunAnalysis {
+            run_dir: summary_only_dir.clone(),
+            grid: [1, 1, 1],
+            available_ticks: Vec::new(),
+            sampled_ticks: Vec::new(),
+            trajectory: None,
+            zonation: None,
+            cells: None,
+            cell_timeline: Vec::new(),
+            chemistry: Vec::new(),
+            rulesets: None,
+            ruleset_timeline: Vec::new(),
+            transporter_pair_timeline: Vec::new(),
+            stoich_v2: Some(summary),
+            findings: Vec::new(),
+            warnings: Vec::new(),
+        };
+        let terminal = render_run_terminal(&analysis);
+        let markdown = render_run_markdown(&analysis);
+
+        assert!(terminal.contains("event-level reaction totals unavailable"));
+        assert!(!terminal.contains("byproduct 0.0000"));
+        assert!(markdown.contains("Event-level reaction byproduct/leakage totals: unavailable"));
+        assert!(!markdown.contains("Reaction byproducts: 0 events"));
+
+        let _ = fs::remove_dir_all(&no_stoich_dir);
+        let _ = fs::remove_dir_all(&summary_only_dir);
+    }
+
+    #[test]
+    fn stoich_v2_analysis_handles_events_without_summary() {
+        let events_only_dir = PathBuf::from("/tmp/marl_analysis_events_only_stoich_v2_test");
+        let _ = fs::remove_dir_all(&events_only_dir);
+        fs::create_dir_all(&events_only_dir).unwrap();
+        fs::write(
+            events_only_dir.join("stoich_v2_events.csv"),
+            "tick,stage,kind,actor_id,species_index,template_id,amount,model_c,model_h,model_o,model_s,model_redox,model_energy,reservoir_c,reservoir_h,reservoir_o,reservoir_s,reservoir_redox,reservoir_energy,residual_abs,balanced\n\
+0,reactions,reaction_byproduct,7,4,255,0.500000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,1\n",
+        )
+        .unwrap();
+
+        let summary = read_stoich_v2_analysis(&events_only_dir)
+            .unwrap()
+            .expect("events-only stoich analysis should be present");
+        assert!(!summary.summary_present);
+        assert!(summary.events_present);
+        assert_eq!(summary.total_ticks, None);
+        assert_eq!(summary.reaction_byproduct_events, 1);
+        assert!((summary.reaction_byproduct_amount - 0.5).abs() < 1e-9);
+
+        let _ = fs::remove_dir_all(&events_only_dir);
     }
 
     #[test]
@@ -2388,6 +2811,7 @@ mod tests {
             rulesets: None,
             ruleset_timeline: Vec::new(),
             transporter_pair_timeline: Vec::new(),
+            stoich_v2: None,
             findings: Vec::new(),
             warnings: Vec::new(),
         };

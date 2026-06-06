@@ -361,6 +361,9 @@ By default, analysis reads the full `ticks.csv` trajectory and samples the
 first, middle, and latest binary snapshots. Use `--all-snapshots`,
 `--latest-only`, or `--ticks 0,500,5000` to change that policy. Use
 `--no-rulesets` when full ruleset sidecars are unavailable or not needed.
+When `stoich_v2_summary.json` is present, the same reports include v2
+stoichiometry metadata. Descriptor-driven `reaction_byproduct` and
+`reaction_leakage` amounts require `stoich_v2_events.csv`.
 
 When full ruleset sidecars are available, `marl-analyze` also reports
 transporter ecology:
@@ -384,6 +387,7 @@ surface HGT counts in its terminal or Markdown summaries.
 - `stoich_ticks.csv` columns: `reaction_count`, `active_flux`, `imbalanced_reaction_count`, `unknown_species_flux`, `carbon_to_energy_flux`, `reductant_to_energy_flux`, `gross_material_abs`, `gross_total_abs`, then net signed `delta_*` budget columns.
 - `stoich_summary.json` reports the same run-level ledger, with `material_abs_sum` as the gross material imbalance magnitude, `gross_total_abs_sum` as the gross material plus redox plus energy magnitude, and `net_material_abs_sum` as the final signed material imbalance after cancellation.
 - v1 files cover legacy intracellular reactions. `stoich_v2_summary.json` and `stoich_v2_events.csv` cover boundary inputs, diffusion/decay, light availability, transport, spatial exchange, intracellular reactions, maintenance, effectors, division, and death.
+- `marl-analyze` summarizes `reaction_byproduct` totals by external species and `reaction_leakage` energy sent to heat when v2 event rows are available.
 - `stoich_enforcement = "audit"` records the v2 ledger without changing dynamics. `stoich_enforcement = "strict"` keeps the feature opt-in, rejects unbalanced transport/effectors and untemplated active reactions, and closes modeled sources/sinks through explicit reservoirs.
 - Strict mode also constrains structural reaction mutations to the balanced template catalog, so strict evolutionary proposal distributions are intentionally different from legacy runs.
 
