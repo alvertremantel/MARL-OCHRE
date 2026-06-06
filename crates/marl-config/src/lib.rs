@@ -45,22 +45,258 @@ pub const EXT_SIGNAL_A: usize = 5;
 pub const EXT_SIGNAL_B: usize = 6;
 pub const EXT_STRUCTURAL: usize = 7;
 
-pub fn external_species_name(species: usize) -> &'static str {
-    match species {
-        EXT_ENERGY => "free_energy",
-        EXT_OXIDANT => "oxidant",
-        EXT_REDUCTANT => "reductant",
-        EXT_CARBON => "carbon",
-        EXT_ORGANIC => "organic",
-        EXT_SIGNAL_A => "signal_a",
-        EXT_SIGNAL_B => "signal_b",
-        EXT_STRUCTURAL => "structural",
-        8 => "spare_0",
-        9 => "spare_1",
-        10 => "spare_2",
-        11 => "spare_3",
-        _ => "unknown",
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ChemicalComposition {
+    pub carbon_backbone: f32,
+    pub oxidizing_power: f32,
+    pub reducing_power: f32,
+    pub phosphate_like_activation: f32,
+    pub lipid_like_tail: f32,
+    pub signal_group: f32,
+    pub structural_group: f32,
+    pub toxin_group: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ExternalSpeciesDescriptor {
+    pub species: usize,
+    pub name: &'static str,
+    pub composition: ChemicalComposition,
+    pub bond_energy: f32,
+    pub extracellular_stability: f32,
+    pub membrane_permeability: f32,
+    pub storage_density: f32,
+    pub work_coupling: f32,
+    pub default_diffusion: f32,
+    pub default_decay: f32,
+}
+
+impl ExternalSpeciesDescriptor {
+    pub const fn inert(species: usize, name: &'static str) -> Self {
+        Self {
+            species,
+            name,
+            composition: ChemicalComposition {
+                carbon_backbone: 0.0,
+                oxidizing_power: 0.0,
+                reducing_power: 0.0,
+                phosphate_like_activation: 0.0,
+                lipid_like_tail: 0.0,
+                signal_group: 0.0,
+                structural_group: 0.0,
+                toxin_group: 0.0,
+            },
+            bond_energy: 0.0,
+            extracellular_stability: 1.0,
+            membrane_permeability: 0.2,
+            storage_density: 0.0,
+            work_coupling: 0.0,
+            default_diffusion: 0.3,
+            default_decay: 0.01,
+        }
     }
+}
+
+pub const EXTERNAL_SPECIES: [ExternalSpeciesDescriptor; S_EXT] = [
+    ExternalSpeciesDescriptor {
+        species: EXT_ENERGY,
+        name: "free_energy",
+        composition: ChemicalComposition {
+            carbon_backbone: 0.0,
+            oxidizing_power: 0.0,
+            reducing_power: 0.0,
+            phosphate_like_activation: 1.0,
+            lipid_like_tail: 0.0,
+            signal_group: 0.0,
+            structural_group: 0.0,
+            toxin_group: 0.0,
+        },
+        bond_energy: 1.0,
+        extracellular_stability: 0.15,
+        membrane_permeability: 0.05,
+        storage_density: 0.1,
+        work_coupling: 1.0,
+        default_diffusion: 0.0,
+        default_decay: 0.2,
+    },
+    ExternalSpeciesDescriptor {
+        species: EXT_OXIDANT,
+        name: "oxidant",
+        composition: ChemicalComposition {
+            carbon_backbone: 0.0,
+            oxidizing_power: 1.0,
+            reducing_power: 0.0,
+            phosphate_like_activation: 0.0,
+            lipid_like_tail: 0.0,
+            signal_group: 0.0,
+            structural_group: 0.0,
+            toxin_group: 0.25,
+        },
+        bond_energy: 0.0,
+        extracellular_stability: 0.8,
+        membrane_permeability: 0.7,
+        storage_density: 0.0,
+        work_coupling: 0.15,
+        default_diffusion: 1.5,
+        default_decay: 0.01,
+    },
+    ExternalSpeciesDescriptor {
+        species: EXT_REDUCTANT,
+        name: "reductant",
+        composition: ChemicalComposition {
+            carbon_backbone: 0.0,
+            oxidizing_power: 0.0,
+            reducing_power: 1.0,
+            phosphate_like_activation: 0.0,
+            lipid_like_tail: 0.0,
+            signal_group: 0.0,
+            structural_group: 0.0,
+            toxin_group: 0.0,
+        },
+        bond_energy: 0.6,
+        extracellular_stability: 0.75,
+        membrane_permeability: 0.55,
+        storage_density: 0.1,
+        work_coupling: 0.4,
+        default_diffusion: 1.0,
+        default_decay: 0.01,
+    },
+    ExternalSpeciesDescriptor {
+        species: EXT_CARBON,
+        name: "carbon",
+        composition: ChemicalComposition {
+            carbon_backbone: 1.0,
+            oxidizing_power: 0.0,
+            reducing_power: 0.0,
+            phosphate_like_activation: 0.0,
+            lipid_like_tail: 0.0,
+            signal_group: 0.0,
+            structural_group: 0.0,
+            toxin_group: 0.0,
+        },
+        bond_energy: 0.35,
+        extracellular_stability: 0.9,
+        membrane_permeability: 0.45,
+        storage_density: 0.45,
+        work_coupling: 0.2,
+        default_diffusion: 1.2,
+        default_decay: 0.005,
+    },
+    ExternalSpeciesDescriptor {
+        species: EXT_ORGANIC,
+        name: "organic",
+        composition: ChemicalComposition {
+            carbon_backbone: 0.8,
+            oxidizing_power: 0.0,
+            reducing_power: 0.1,
+            phosphate_like_activation: 0.0,
+            lipid_like_tail: 0.1,
+            signal_group: 0.0,
+            structural_group: 0.0,
+            toxin_group: 0.2,
+        },
+        bond_energy: 0.25,
+        extracellular_stability: 0.55,
+        membrane_permeability: 0.25,
+        storage_density: 0.35,
+        work_coupling: 0.1,
+        default_diffusion: 0.8,
+        default_decay: 0.03,
+    },
+    ExternalSpeciesDescriptor {
+        species: EXT_SIGNAL_A,
+        name: "signal_a",
+        composition: ChemicalComposition {
+            carbon_backbone: 0.2,
+            oxidizing_power: 0.0,
+            reducing_power: 0.0,
+            phosphate_like_activation: 0.0,
+            lipid_like_tail: 0.0,
+            signal_group: 1.0,
+            structural_group: 0.0,
+            toxin_group: 0.0,
+        },
+        bond_energy: 0.05,
+        extracellular_stability: 0.45,
+        membrane_permeability: 0.4,
+        storage_density: 0.0,
+        work_coupling: 0.0,
+        default_diffusion: 0.5,
+        default_decay: 0.05,
+    },
+    ExternalSpeciesDescriptor {
+        species: EXT_SIGNAL_B,
+        name: "signal_b",
+        composition: ChemicalComposition {
+            carbon_backbone: 0.2,
+            oxidizing_power: 0.0,
+            reducing_power: 0.0,
+            phosphate_like_activation: 0.0,
+            lipid_like_tail: 0.0,
+            signal_group: 1.0,
+            structural_group: 0.0,
+            toxin_group: 0.0,
+        },
+        bond_energy: 0.05,
+        extracellular_stability: 0.45,
+        membrane_permeability: 0.4,
+        storage_density: 0.0,
+        work_coupling: 0.0,
+        default_diffusion: 0.5,
+        default_decay: 0.05,
+    },
+    ExternalSpeciesDescriptor {
+        species: EXT_STRUCTURAL,
+        name: "structural",
+        composition: ChemicalComposition {
+            carbon_backbone: 0.4,
+            oxidizing_power: 0.0,
+            reducing_power: 0.0,
+            phosphate_like_activation: 0.0,
+            lipid_like_tail: 0.2,
+            signal_group: 0.0,
+            structural_group: 1.0,
+            toxin_group: 0.0,
+        },
+        bond_energy: 0.1,
+        extracellular_stability: 0.95,
+        membrane_permeability: 0.02,
+        storage_density: 0.2,
+        work_coupling: 0.0,
+        default_diffusion: 0.1,
+        default_decay: 0.002,
+    },
+    ExternalSpeciesDescriptor::inert(8, "spare_0"),
+    ExternalSpeciesDescriptor::inert(9, "spare_1"),
+    ExternalSpeciesDescriptor::inert(10, "spare_2"),
+    ExternalSpeciesDescriptor::inert(11, "spare_3"),
+];
+
+pub fn external_species_name(species: usize) -> &'static str {
+    EXTERNAL_SPECIES
+        .get(species)
+        .map(|descriptor| descriptor.name)
+        .unwrap_or("unknown")
+}
+
+pub fn default_external_diffusion() -> [f32; S_EXT] {
+    let mut out = [0.0; S_EXT];
+    let mut i = 0;
+    while i < S_EXT {
+        out[i] = EXTERNAL_SPECIES[i].default_diffusion;
+        i += 1;
+    }
+    out
+}
+
+pub fn default_external_decay() -> [f32; S_EXT] {
+    let mut out = [0.0; S_EXT];
+    let mut i = 0;
+    while i < S_EXT {
+        out[i] = EXTERNAL_SPECIES[i].default_decay;
+        i += 1;
+    }
+    out
 }
 
 // ============================================================================
@@ -288,10 +524,8 @@ impl Default for SimulationConfig {
             dt: 1.0,
             diffusion_substeps: 10,
 
-            d_voxel: [0.0, 1.5, 1.0, 1.2, 0.8, 0.5, 0.5, 0.1, 0.3, 0.3, 0.3, 0.3],
-            lambda_decay: [
-                0.2, 0.01, 0.01, 0.005, 0.03, 0.05, 0.05, 0.002, 0.01, 0.01, 0.01, 0.01,
-            ],
+            d_voxel: default_external_diffusion(),
+            lambda_decay: default_external_decay(),
 
             source_rate_oxidant: 0.4,
             source_rate_carbon: 0.15,
@@ -639,6 +873,34 @@ mod tests {
         assert!(!out.write_stoich_tick_log);
         assert!(!out.write_stoich_v2_summary);
         assert!(!out.write_stoich_v2_events);
+    }
+
+    #[test]
+    fn external_species_catalog_matches_species_slots() {
+        assert_eq!(EXTERNAL_SPECIES.len(), S_EXT);
+        for (index, descriptor) in EXTERNAL_SPECIES.iter().enumerate() {
+            assert_eq!(descriptor.species, index);
+            assert_eq!(external_species_name(index), descriptor.name);
+            assert!(descriptor.default_diffusion.is_finite());
+            assert!(descriptor.default_decay.is_finite());
+            assert!(descriptor.default_diffusion >= 0.0);
+            assert!(descriptor.default_decay >= 0.0);
+        }
+    }
+
+    #[test]
+    fn default_physics_comes_from_external_species_catalog() {
+        let sim = SimulationConfig::default();
+        assert_eq!(sim.d_voxel, default_external_diffusion());
+        assert_eq!(sim.lambda_decay, default_external_decay());
+        assert_eq!(sim.lambda_decay[EXT_ENERGY], 0.2);
+        assert!(
+            EXTERNAL_SPECIES[EXT_ENERGY].work_coupling > EXTERNAL_SPECIES[EXT_CARBON].work_coupling
+        );
+        assert!(
+            EXTERNAL_SPECIES[EXT_CARBON].storage_density
+                > EXTERNAL_SPECIES[EXT_ENERGY].storage_density
+        );
     }
 
     #[test]
