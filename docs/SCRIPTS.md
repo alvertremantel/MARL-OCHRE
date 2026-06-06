@@ -49,7 +49,7 @@ python scripts/check_binary_dump.py <run_dir> <tick> --require-full-rulesets
     - File size matches `header + dict_count × ruleset_byte_size + cell_count × cell_ref_stride`
     - All per-cell dict_id references are within dictionary bounds
     - All canonical dictionary float fields are finite
-   - All cell positions are within grid bounds
+    - All cell positions are within grid bounds
 
 ### Output
 
@@ -75,7 +75,7 @@ ok: first_f32=0.0034521, field_bytes=50331648, cell_count=127
 
 # Error example — tick without snapshot
 $ python scripts/check_binary_dump.py output/run_128x128x64 100
-FileNotFoundError: [Errno 2] No such file or directory: 'output/run_128x128x64/tick_100.field.bin'
+FileNotFoundError: [Errno 2] No such file or directory: 'output/run_128x128x64/tick_100.field.bin.zst'
 ```
 
 ### Typical Use
@@ -146,7 +146,7 @@ On failure, exits non-zero with an error message describing the mismatch.
 ```bash
 $ python scripts/inspect_rulesets.py output/run_128x128x64/tick_1000.rulesets.bin.zst
 Inspecting: output/run_128x128x64/tick_1000.rulesets.bin.zst
-  Raw size: 45,818 bytes
+  Raw size: 52,526 bytes
 
   ── Header ──
   Magic:    MRSF

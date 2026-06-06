@@ -2,24 +2,27 @@
 
 ## Overview
 
-MARL is a 3D reaction-diffusion cellular automaton written in Rust. It is aimed at open-ended microbial evolution in a vertically structured environment rather than at a single fixed game or benchmark. The codebase is organized as a Cargo workspace with three crates. The current implementation is a CPU prototype (with an optional GPU diffusion path) of a Winogradsky-column-like system with sparse cells, a dense extracellular field, top-down light attenuation, and lineage-producing cell division.
+MARL is a 3D reaction-diffusion cellular automaton written in Rust. It is aimed at open-ended microbial evolution in a vertically structured environment rather than at a single fixed game or benchmark. The codebase is organized as a multi-crate Cargo workspace. The current implementation is a CPU-first prototype, with optional GPU diffusion support behind a feature, of a Winogradsky-column-like system with sparse cells, a dense extracellular field, top-down light attenuation, lineage-producing cell division, receptor-gated transport, and optional local HGT.
 
 Today the code is small enough to read end to end, and it is already coherent. It is also clearly mid-iteration: a few systems are fully implemented, a few are intentionally skeletal, and a few were started and then left disconnected when work moved elsewhere.
 
 ## High-Level Architecture
 
-The project has a clean split between environment, cells, orchestration, and outputs.
+The project now has a deliberate split between configuration, field storage, cell biology, orchestration, outputs, analysis, and viewing.
 
-- `crates/marl-config/src/lib.rs` defines runtime grid, physics, and output configuration plus fixed species/ruleset array sizes.
-- `crates/marl-engine/src/field.rs` owns the extracellular chemical field and the diffusion solver.
-- `crates/marl-engine/src/cell.rs` owns the evolvable cell ruleset, internal state, per-tick update, and mutation logic.
-- `crates/marl-engine/src/light.rs` computes a separate light availability field from the current chemistry and occupancy.
-- `crates/marl-engine/src/main.rs` ties everything together: seeding, tick order, births, deaths, and output cadence.
-- `crates/marl-output/src/data.rs` and `crates/marl-output/src/snapshot.rs` convert state into files for later analysis.
+- `crates/marl-engine/src/main.rs` is a thin binary entry point: it loads config and calls `marl_sim::run`.
+- `crates/marl-config/src/lib.rs` defines runtime grid, physics, HGT, and output configuration plus fixed species/ruleset array sizes.
+- `crates/marl-field/src/field.rs` owns the runtime-sized extracellular chemical field and CPU diffusion solver.
+- `crates/marl-field/src/light.rs` computes a separate light availability field from current chemistry and occupancy.
+- `crates/marl-cell/src/cell.rs` owns cell state, evolvable rulesets, receptor-gated transport, intracellular reactions, fate decisions, and mutation logic.
+- `crates/marl-cell/src/hgt.rs` contains the reaction-rule HGT primitive used by the optional local HGT phase.
+- `crates/marl-sim/src/lib.rs` orchestrates the tick loop: boundary sources, diffusion, light, cell ticks, births/deaths, HGT, logging, and snapshots.
+- `crates/marl-sim/src/starter_metabolisms.rs`, `seeding.rs`, `spatial.rs`, and `stats.rs` own starter cell construction, initial placement, local exchange/neighborhood searches, and stdout summaries.
+- `crates/marl-output/src/data.rs`, `binary_dump.rs`, and `snapshot.rs` convert state into CSV/Markdown, compressed binary viewer/analysis records, and raw PPM images.
+- `crates/marl-format/src/lib.rs` owns the shared binary schema (`RunMeta`, `ViewerCellRecord`, field layout constants, ruleset dump constants).
 - `crates/marl-analysis` and `crates/marl-analyze` provide the canonical headless analysis workflow for completed runs.
-- `crates/marl-cell/src/hgt.rs` contains the reaction-rule HGT primitive, invoked by the optional local HGT phase in `crates/marl-sim/src/lib.rs`.
-- `crates/marl-output/src/binary_dump.rs` writes raw binary field arrays, compact viewer cell records, and `run_meta.json`.
-- `crates/marl-format/src/lib.rs` owns the shared binary schema (`RunMeta`, `ViewerCellRecord`, field layout constants).
+- `crates/marl-viewer-core`, `crates/marl-viewer-render`, and `crates/marl-viewer-rs` split viewer argument/IO types, renderer/GUI, and the standalone viewer binary.
+- `crates/marl-gpu` contains the optional GPU diffusion prototype used by `marl-engine --features gpu -- --gpu-diffusion`.
 
 Conceptually, the simulation loop is:
 
@@ -28,7 +31,8 @@ Conceptually, the simulation loop is:
 3. Recompute the light field.
 4. Tick each cell against the chemistry visible from neighboring empty voxels.
 5. Apply births and deaths.
-6. Log and snapshot.
+6. Run optional local HGT if enabled and due.
+7. Log and snapshot.
 
 One important caveat: cells are updated sequentially inside the tick, and each cell's field deltas are applied immediately. Later cells in the iteration therefore see a slightly newer extracellular state than earlier cells.
 
@@ -36,7 +40,7 @@ One important caveat: cells are updated sequentially inside the tick, and each c
 
 ### Extracellular Field
 
-The extracellular environment is a dense 3D field stored as a flat `Vec<f32>` in `crates/marl-engine/src/field.rs`. Each voxel stores `S_EXT = 12` external species. The current default grid is `128 x 128 x 64`, so the field is calibration-scale rather than the much larger target implied by earlier project notes.
+The extracellular environment is a dense 3D field stored as a flat `Vec<f32>` in `crates/marl-field/src/field.rs`. Each voxel stores `S_EXT = 12` external species. Grid dimensions are runtime-configurable through `[grid]` in TOML; the default is `128 x 128 x 64`.
 
 Important external species in current use:
 
@@ -151,13 +155,13 @@ This design is central to the project's behavior and is much more important than
 
 ### Neighbor Exchange
 
-Cells exchange chemistry only with empty face neighbors. If a cell is fully enclosed, it cannot access fresh resources and cannot release waste to the field. In that case it tends to starve.
+Cells exchange chemistry only with empty face neighbors. If a cell is fully enclosed, it cannot access fresh resources and cannot release waste to the field. In that case it tends to starve. Optional HGT is separate from this chemistry exchange path: it uses a local cubic neighborhood, can include diagonal neighbors, and copies reaction rules rather than moving chemical mass.
 
 That means the simulation's notion of crowding is not abstract. It is implemented directly in the geometry of exchange.
 
 ## Light Model
 
-`crates/marl-engine/src/light.rs` computes a separate scalar field using a Beer-Lambert style top-down sweep.
+`crates/marl-field/src/light.rs` computes a separate scalar field using a Beer-Lambert style top-down sweep.
 
 Attenuation sources are currently:
 
@@ -188,7 +192,7 @@ The current run seeds three metabolisms in different depth bands.
 - use reductant as their main energy source
 - include an oxidant-toxicity mechanism that makes oxygenated environments hostile
 
-These are encoded directly in `crates/marl-engine/src/main.rs` as starter factory functions, not as external data files.
+These are encoded directly in `crates/marl-sim/src/starter_metabolisms.rs` as starter factory functions, not as external data files.
 
 ## Evolution And Lineage
 
@@ -205,7 +209,9 @@ Mutation has two levels:
 - common parametric perturbations
 - rarer structural rewiring
 
-The structural rewiring logic is gene-duplication-inspired, but not a literal full-topology copy. Substrate, product, and catalyst are each sampled independently from active reactions during rare structural mutation, so new reactions are often chimeric combinations assembled from previously active parts rather than exact duplicates of a single donor reaction.
+Transport rates, gate weights, receptors, reactions, effectors, fate thresholds, HGT propensity, and mutation rate can all evolve. Transporter structural mutation can rewire external species, internal species, and the gate receptor selector. Reaction structural mutation is gene-duplication-inspired, but not a literal full-topology copy in legacy mode: substrate, product, and catalyst are each sampled independently from active reactions during rare structural mutation, so new reactions are often chimeric combinations assembled from previously active parts rather than exact duplicates of a single donor reaction. Strict stoichiometry mode instead draws structural reaction mutations from balanced templates.
+
+Optional HGT is a separate horizontal path. When enabled, the sim runs a local neighborhood phase on its own cadence. A recipient's finite, positive `hgt_propensity` is multiplied by `hgt_base_rate`; successful transfers copy one complete active reaction rule from a local donor ruleset snapshot into the recipient. HGT is capped per tick and per recipient, disabled by default, and logged as an event count in `ticks.csv`.
 
 ## Data And Outputs
 
@@ -234,7 +240,7 @@ The shared schema for these files lives in `crates/marl-format/` so both engine 
 - `reaction_registry.csv`
 - `summary.md`
 
-The reaction registry is especially useful because it gives stable IDs to reaction topologies across the run, which makes later lineage and convergence analysis much more tractable.
+`ticks.csv` includes population, energy, active reaction averages, per-tick divisions/deaths, HGT event counts, and per-z-layer population counts. The reaction registry is especially useful because it gives stable IDs to reaction topologies across the run, which makes later lineage and convergence analysis much more tractable.
 
 ### Image Outputs
 
@@ -256,9 +262,11 @@ The project is in a good prototype state. It is not a toy, but it is also not ye
 - 3D field storage and diffusion
 - cell-body exclusion from diffusion
 - light attenuation field
-- cell tick loop with transport, reaction, secretion, death, and division prep
+- cell tick loop with receptor-gated transport, reaction, secretion, death, and division prep
 - mutation and lineage generation
+- optional local HGT with runtime guardrails and tick logging
 - binary viewer records (field, compact cells, metadata) and an interactive `wgpu`/`egui` 3D viewer
+- headless analysis for trajectories, chemistry, zonation, genotype diversity, and transporter ecology
 - run summaries and useful raw outputs
 - a coherent seeded ecological scenario
 
@@ -268,10 +276,11 @@ The project is in a good prototype state. It is not a toy, but it is also not ye
 - optional HGT is wired into the tick loop, but disabled by default and still experimental
 - signaling species exist in the chemistry space but are not meaningfully used by starters
 - structural deposit species affects diffusion, but current starter metabolisms do not actively build a structural niche
+- `marl-analyze` reads genotype/ruleset and transporter summaries, but does not yet surface HGT event counts from `ticks.csv`
 
 ### Stale Or Aspirational Elements
 
-- older descriptions of much larger grid sizes no longer match the actual default configuration
+- older descriptions of much larger grid sizes no longer match the current runtime-configurable default
 - older GPU-facing intent from early project notes predates the current CPU-first architecture (the optional GPU diffusion path now exists as a prototype behind the `gpu` feature)
 
 ## Practical Caveats
@@ -285,26 +294,29 @@ Several current simplifications matter if this code is used for serious experime
 - Quiescence is partial rather than a deep dormancy mode.
 - Cells are updated sequentially with immediate field writes inside each tick.
 - Grid dimensions, physics, chemistry, and output parameters are runtime-configurable via TOML + CLI. Species counts and ruleset slot counts remain compile-time constants because they determine fixed-size cell/ruleset arrays.
-- Unit and integration tests exist for engine field diffusion, binary dump layout, GPU diffusion equivalence, viewer CLI/IO/camera/renderer/GUI, and the shared format crate. Run with `cargo test --workspace`.
+- Unit and integration tests exist for config parsing, field/light behavior, cell transport/reaction/HGT logic, sim orchestration, binary dump layout, analysis parsing, GPU diffusion equivalence, viewer CLI/IO/camera/renderer/GUI, and the shared format crate. Run with `cargo test --workspace`.
 
 These are not necessarily flaws for the present phase, but they define the boundary between prototype behavior and stronger scientific claims.
 
-## Suggested Reading Order In `crates/marl-engine/src/`
+## Suggested Reading Order
 
 If you want to reacquire context quickly, this is the best reading sequence:
 
-1. `crates/marl-engine/src/config.rs`
-2. `crates/marl-engine/src/field.rs`
-3. `crates/marl-engine/src/cell.rs`
-4. `crates/marl-engine/src/main.rs`
-5. `crates/marl-engine/src/light.rs`
-6. `crates/marl-output/src/data.rs`
-7. `crates/marl-output/src/snapshot.rs`
-8. `crates/marl-cell/src/hgt.rs`
-9. `crates/marl-output/src/binary_dump.rs`
-10. `crates/marl-format/src/lib.rs`
+1. `crates/marl-config/src/lib.rs`
+2. `crates/marl-field/src/field.rs`
+3. `crates/marl-field/src/light.rs`
+4. `crates/marl-cell/src/cell.rs`
+5. `crates/marl-cell/src/hgt.rs`
+6. `crates/marl-sim/src/lib.rs`
+7. `crates/marl-sim/src/spatial.rs`
+8. `crates/marl-sim/src/starter_metabolisms.rs`
+9. `crates/marl-output/src/data.rs`
+10. `crates/marl-output/src/binary_dump.rs`
+11. `crates/marl-format/src/lib.rs`
+12. `crates/marl-analysis/src/lib.rs`
+13. `crates/marl-viewer-core/src/io.rs`
 
-That order follows the dependency chain from assumptions, to field physics, to cell logic, to orchestration, then to outputs and unfinished extension points.
+That order follows the dependency chain from assumptions, to field physics, to cell logic, orchestration, binary outputs, analysis, and viewer consumption.
 
 ## Bottom Line
 

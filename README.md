@@ -6,7 +6,7 @@
 
 -- *the encyclopedia brittanica, for some reason*
 
-MARL is a CPU-based Rust research prototype for 3D reaction-diffusion cellular automata with simulated lineage. It models sparse microbial cells embedded in a continuous extracellular chemical field. Cells do not interact directly. They interact through transport, secretion, diffusion-limited access to neighboring empty voxels, and a depth-dependent light field.
+MARL is a CPU-based Rust research prototype for 3D reaction-diffusion cellular automata with simulated lineage. It models sparse microbial cells embedded in a continuous extracellular chemical field. By default, cells interact through transport, secretion, diffusion-limited access to neighboring empty voxels, and a depth-dependent light field; optional HGT adds a direct local reaction-rule transfer path when enabled.
 
 The current codebase is a Winogradsky-column style simulation: oxidant and carbon are sourced at the top boundary, reductant is sourced at the bottom boundary, and three starter metabolisms are seeded at different depths. Birth, death, quiescence, and mutation emerge from local chemistry and per-cell rulesets rather than from any explicit fitness function.
 
@@ -23,11 +23,14 @@ The current codebase is a Winogradsky-column style simulation: oxidant and carbo
 
 ## Key Crates
 
-- [`marl-engine`](crates/marl-engine/) — simulation library, engine binary, and optional GPU diffusion prototype
-- [`marl-analyze`](crates/marl-analyze/) — headless run/comparison analysis CLI
-- [`marl-analysis`](crates/marl-analysis/) — reusable analysis/reporting library
+- [`marl-engine`](crates/marl-engine/) — thin engine binary that loads config and calls `marl-sim`
+- [`marl-sim`](crates/marl-sim/) — simulation orchestration: seeding, tick loop, births/deaths, HGT, outputs
+- [`marl-cell`](crates/marl-cell/) — cell state, evolvable rulesets, receptor-gated transport, reactions, mutation, HGT primitive
+- [`marl-field`](crates/marl-field/) — runtime-sized extracellular field and light field
+- [`marl-output`](crates/marl-output/) — binary dumps, CSV/Markdown logs, and PPM snapshots
+- [`marl-format`](crates/marl-format/) — shared binary metadata and cell/ruleset schema for engine/viewer/analysis interop
+- [`marl-analyze`](crates/marl-analyze/) / [`marl-analysis`](crates/marl-analysis/) — headless run/comparison analysis CLI and reusable library
 - [`marl-viewer-rs`](crates/marl-viewer-rs/) — standalone `wgpu` 3D viewer with `egui` GUI
-- [`marl-format`](crates/marl-format/) — shared binary metadata and cell-record schema for engine/viewer interop
 
 A detailed architecture walkthrough lives in [`docs/INFO.md`](docs/INFO.md).
 
@@ -55,10 +58,10 @@ A detailed architecture walkthrough lives in [`docs/INFO.md`](docs/INFO.md).
 - Language: Rust
 - Execution model: CPU default, optional GPU field diffusion prototype
 - Default grid: `128 × 128 × 64`
-- Transport medium: diffusion only
+- Transport medium: diffusion by default, plus optional local HGT when enabled
 - Cell occupancy: one cell per voxel
 - Light model: Beer-Lambert attenuation from the surface
-- Evolution path: vertical mutation during division
+- Evolution path: vertical mutation during division, plus optional local HGT when enabled
 - Configuration: runtime TOML + CLI for grid dimensions, physics, and output parameters
 
 This repository is a functional prototype, not a polished platform. The core simulation loop, field physics, lineage tracking, viewer-oriented dumps, run summaries, and interactive viewer are implemented. Several intended extensions are present only in partial form.

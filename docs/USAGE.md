@@ -24,7 +24,7 @@ the MARL simulation and its standalone viewer.
 cargo build --release --workspace
 ```
 
-This builds both the `marl-engine` and `marl-viewer-rs` binaries under
+This builds the engine, viewer, analysis CLI, and all library crates under
 `target/release/`.
 
 ### Engine only
@@ -85,7 +85,7 @@ built-in defaults and any TOML config file:
 | `--ticks <n>` | Total simulation ticks | 5000 |
 | `--stats <n>` | Stdout stats interval (ticks) | 100 |
 | `--snapshot <n>` | Binary (and optional CSV) snapshot interval | 500 |
-| `--ruleset-interval <n>` | Per-layer ruleset-average binary interval | 1000 |
+| `--ruleset-interval <n>` | Ruleset sidecar binary interval | 1000 |
 | `--images <n>` | PPM image snapshot interval | 500 |
 | `--seed <n>` | Cells to seed per starter metabolism | 30 |
 | `--output <dir>` | Output directory | `output/run_128x128x64` |
@@ -133,7 +133,7 @@ what you want to change.
 
 ### Configuration hierarchy
 
-1. **Built-in defaults** (hardcoded in `config.rs`)
+1. **Built-in defaults** (hardcoded in `crates/marl-config/src/lib.rs`)
 2. **TOML file** (overrides defaults for any keys present)
 3. **CLI flags** (override run-control fields: `--ticks`, `--stats`, etc.)
 
@@ -185,10 +185,10 @@ Core physics and biology parameters:
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `hgt_enabled` | bool | false | Enables local horizontal gene transfer phase |
-| `hgt_interval` | u32 | 10 | Tick cadence for HGT attempts; tick 0 is eligible when enabled; 0 disables attempts |
-| `hgt_radius` | u8 | 1 | Local cubic voxel radius for possible donors; 1 includes adjacent and diagonal neighbors |
+| `hgt_interval` | u32 | 10 | Tick cadence for HGT attempts; tick 0 is eligible when enabled; must be >0 when `hgt_enabled = true` |
+| `hgt_radius` | u8 | 1 | Local cubic voxel radius for possible donors; 1 includes adjacent and diagonal neighbors; must be >0 when enabled |
 | `hgt_base_rate` | f32 | 0.02 | Base per-recipient attempt probability multiplied by evolved `hgt_propensity` |
-| `hgt_max_events_per_tick` | usize | 100 | Global cap on successful HGT transfers per tick |
+| `hgt_max_events_per_tick` | usize | 100 | Global cap on successful HGT transfers per tick; must be >0 when enabled |
 
 **Seeding geometry:**
 
@@ -264,7 +264,7 @@ Runs write into `output_dir` (default: `output/run_128x128x64`).
 
 | File | Format | Description |
 |------|--------|-------------|
-| `run_meta.json` | JSON | Grid dimensions, species counts, binary byte layouts, snapshot interval |
+| `run_meta.json` | JSON | Grid dimensions, species counts, binary byte layouts, snapshot intervals, compression mode, and optional ruleset schema metadata |
 | `tick_<T>.field.bin.zst` | zstd-compressed raw f32 LE | Full extracellular field in `[z][y][x][species]` order when `write_binary_field = true` |
 | `tick_<T>.cells.bin.zst` | zstd-compressed packed binary | Sparse viewer cell records (pos, lineage_id, starter_type, energy) when `write_binary_cells = true`; not full cell state |
 | `summary.md` | Markdown | End-of-run population, chemistry, and configuration summary |
@@ -273,7 +273,7 @@ Runs write into `output_dir` (default: `output/run_128x128x64`).
 
 | File | Requires | Description |
 |------|----------|-------------|
-| `ticks.csv` | `write_tick_log = true` | Per-tick population and z-layer counts |
+| `ticks.csv` | `write_tick_log = true` | Per-tick population, average energy/enzyme/activity summaries, divisions, deaths, HGT event counts, and z-layer counts |
 | `stoich_summary.json` | `write_stoich_summary = true` | End-of-run audit of legacy intracellular reactions, including gross imbalance totals and net signed deltas |
 | `stoich_ticks.csv` | `write_stoich_tick_log = true` | Per-tick stoichiometry audit totals with gross imbalance columns plus net signed deltas |
 | `stoich_v2_summary.json` | `write_stoich_v2_summary = true` or stoich enforcement enabled | Versioned full-system ledger with stage and reservoir totals |
@@ -332,6 +332,10 @@ transporter ecology:
 Current full ruleset dumps are v2/576-byte payloads. `marl-analyze`,
 `check_binary_dump.py`, and `inspect_rulesets.py` also support legacy
 v1/536-byte payloads and report those transporters as ungated.
+
+HGT event counts are currently written to `ticks.csv` as
+`hgt_events_this_tick`. `marl-analyze` parses the trajectory but does not yet
+surface HGT counts in its terminal or Markdown summaries.
 
 ### Stoichiometry audit outputs
 
@@ -567,8 +571,8 @@ cargo run -p marl-engine --release -- --config my.toml --ticks 10 --stats 1
 ```
 
 Watch stdout for the stats line — if it shows zero cells or odd chemistry, the
-config may have been rejected. The engine silently falls back to defaults on
-parse failure.
+config may have been rejected. On TOML parse failure the engine prints a warning
+and falls back to built-in defaults.
 
 ### `Normal::new` panic on startup
 
