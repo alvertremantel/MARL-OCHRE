@@ -38,7 +38,18 @@ fn validate_run_config(cfg: &Config) -> Result<(), String> {
     cfg.grid.validate()?;
     validate_diffusion_config(&cfg.simulation)?;
     cfg.simulation.validate_chemistry()?;
+    validate_mutation_config(&cfg.simulation)?;
     validate_hgt_config(&cfg.simulation)
+}
+
+fn validate_mutation_config(sim: &SimulationConfig) -> Result<(), String> {
+    if !sim.mutation_stddev.is_finite() || sim.mutation_stddev <= 0.0 {
+        return Err(format!(
+            "mutation_stddev must be finite and > 0.0, got {}",
+            sim.mutation_stddev
+        ));
+    }
+    Ok(())
 }
 
 fn validate_hgt_config(sim: &SimulationConfig) -> Result<(), String> {
@@ -146,11 +157,8 @@ fn run_hgt_phase(
 /// # Arguments
 /// - `cfg` — fully-parsed simulation + output configuration
 /// - `use_gpu_diffusion` — whether to attempt GPU-accelerated diffusion
-pub fn run(cfg: Config, _use_gpu_diffusion: bool) {
-    if let Err(e) = validate_run_config(&cfg) {
-        eprintln!("Invalid simulation configuration: {e}");
-        return;
-    }
+pub fn run(cfg: Config, _use_gpu_diffusion: bool) -> Result<(), String> {
+    validate_run_config(&cfg)?;
     let grid = cfg.grid;
 
     let mut rng = rand::rng();
@@ -729,6 +737,8 @@ pub fn run(cfg: Config, _use_gpu_diffusion: bool) {
     {
         eprintln!("Warning: failed to write ancestry map: {}", e);
     }
+
+    Ok(())
 }
 
 fn record_diffusion_losses(
@@ -823,6 +833,22 @@ mod tests {
 
             let err = validate_run_config(&cfg).unwrap_err();
             assert!(err.contains("hgt_base_rate"));
+        }
+    }
+
+    #[test]
+    fn invalid_mutation_stddev_is_rejected_before_run_loop() {
+        for mutation_stddev in [f32::NAN, f32::INFINITY, 0.0, -0.1] {
+            let cfg = Config {
+                simulation: SimulationConfig {
+                    mutation_stddev,
+                    ..SimulationConfig::default()
+                },
+                ..Config::default()
+            };
+
+            let err = validate_run_config(&cfg).unwrap_err();
+            assert!(err.contains("mutation_stddev"));
         }
     }
 
@@ -1002,7 +1028,7 @@ mod tests {
         cfg.output.write_ancestry_map = false;
         cfg.output.write_density_map = false;
 
-        run(cfg, false);
+        run(cfg, false).unwrap();
 
         let dir = PathBuf::from(&out_dir);
         assert!(dir.join("stoich_summary.json").exists());
@@ -1038,7 +1064,7 @@ mod tests {
         cfg.output.write_ancestry_map = false;
         cfg.output.write_density_map = false;
 
-        run(cfg, false);
+        run(cfg, false).unwrap();
 
         let dir = PathBuf::from(&out_dir);
         let events = fs::read_to_string(dir.join("stoich_v2_events.csv")).unwrap();
@@ -1065,7 +1091,7 @@ mod tests {
         cfg.output.write_ancestry_map = false;
         cfg.output.write_density_map = false;
 
-        run(cfg, false);
+        run(cfg, false).unwrap();
 
         let dir = PathBuf::from(&out_dir);
         let summary = fs::read_to_string(dir.join("stoich_v2_summary.json")).unwrap();

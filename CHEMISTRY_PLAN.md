@@ -117,6 +117,10 @@ model stable.
 - Byproduct analysis: `marl-analyze` now reads v2 stoichiometry events when
   available and reports reaction-byproduct and heat-leakage totals in terminal,
   Markdown, and JSON reports.
+- Calibration support: `marl-analyze compare` now carries reaction-byproduct
+  and heat-leakage totals across runs, and TOML parsing/validation rejects
+  unknown keys and invalid values so typoed calibration settings fail before a
+  run starts.
 
 The next implementation target is byproduct calibration: quantify when these
 routed byproducts create cross-feeding versus runaway public goods, then use

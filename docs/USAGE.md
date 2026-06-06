@@ -610,21 +610,20 @@ path, then click `Load Dir`.
 Click `Reload` in the viewer GUI to rescan the output directory for new tick
 files. The viewer does not watch the filesystem automatically.
 
-### TOML config is ignored / falling back to defaults
+### TOML config is rejected
 
-Check your TOML syntax. A missing `[simulation]` or `[output]` section header
-will cause the entire file to be ignored. Run with only the config change to
-isolate:
+Check your TOML syntax and section names. Unknown keys are rejected, including
+fields in the wrong section, so typoed calibration settings cannot silently fall
+back to defaults. Run with only the config change to isolate:
 
 ```bash
 cargo run -p marl-engine --release -- --config my.toml --ticks 10 --stats 1
 ```
 
-Watch stdout for the stats line — if it shows zero cells or odd chemistry, the
-config may have been rejected. On TOML parse failure the engine prints a warning
-and falls back to built-in defaults.
+On TOML parse or validation failure the engine prints an error and exits before
+starting the run.
 
-### `Normal::new` panic on startup
+### Mutation standard deviation is rejected
 
-Setting `mutation_stddev = 0.0` or a negative value will cause a runtime panic
-in the mutation RNG. Keep `mutation_stddev > 0.0`.
+Setting `mutation_stddev = 0.0`, a negative value, or a non-finite value is
+rejected before the run starts. Keep `mutation_stddev > 0.0`.

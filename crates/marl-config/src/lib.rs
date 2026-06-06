@@ -384,7 +384,7 @@ fn descriptor_composition_overlap(a: &ChemicalComposition, b: &ChemicalCompositi
 
 /// Runtime grid dimensions for the 3D simulation domain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct GridDims {
     #[serde(default = "default_grid_x")]
     pub x: usize,
@@ -461,6 +461,7 @@ impl BoundaryFace {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BoundarySourceConfig {
     pub species: usize,
     pub face: BoundaryFace,
@@ -486,6 +487,7 @@ impl BoundarySourceConfig {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BoundaryPrimeConfig {
     pub species: usize,
     pub face: BoundaryFace,
@@ -512,7 +514,7 @@ impl BoundaryPrimeConfig {
 
 /// Physics, chemistry, biology, and seeding parameters.
 #[derive(Debug, Clone, serde::Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct SimulationConfig {
     // Spatiotemporal
     pub dx: f32,
@@ -1006,7 +1008,7 @@ impl RulesetOutputMode {
 
 /// Logging cadence, snapshot selection, image toggles, and output directory.
 #[derive(Debug, Clone, serde::Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct OutputConfig {
     pub max_ticks: u32,
     pub stats_interval: u32,
@@ -1072,6 +1074,7 @@ impl Default for OutputConfig {
 
 /// Unified configuration: simulation + output.
 #[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     #[serde(default)]
     pub grid: GridDims,
@@ -1094,19 +1097,32 @@ impl Config {
         let mut config_path: Option<String> = None;
         let mut i = 1;
         while i < args.len() {
-            if args[i] == "--config" && i + 1 < args.len() {
+            if args[i] == "--config" {
+                if i + 1 >= args.len() {
+                    eprintln!("Error: --config requires a path");
+                    std::process::exit(2);
+                }
                 config_path = Some(args[i + 1].clone());
                 i += 2;
             } else {
                 i += 1;
             }
         }
+        let explicit_config = config_path.is_some();
         let toml_path = config_path.unwrap_or_else(|| "marl.toml".to_string());
-        if let Ok(content) = std::fs::read_to_string(&toml_path) {
-            match toml::from_str::<Config>(&content) {
+        match std::fs::read_to_string(&toml_path) {
+            Ok(content) => match toml::from_str::<Config>(&content) {
                 Ok(parsed) => cfg = parsed,
-                Err(err) => eprintln!("Warning: failed to parse config {}: {err}", toml_path),
+                Err(err) => {
+                    eprintln!("Error: failed to parse config {}: {err}", toml_path);
+                    std::process::exit(2);
+                }
+            },
+            Err(err) if explicit_config => {
+                eprintln!("Error: failed to read config {}: {err}", toml_path);
+                std::process::exit(2);
             }
+            Err(_) => {}
         }
 
         // 3. CLI override (run-control flags only)
@@ -1380,6 +1396,41 @@ mod tests {
         assert!(cfg.output.write_stoich_tick_log);
         assert!(cfg.output.write_stoich_v2_summary);
         assert!(cfg.output.write_stoich_v2_events);
+    }
+
+    #[test]
+    fn toml_rejects_unknown_config_fields() {
+        let err = toml::from_str::<Config>(
+            r#"
+            [output]
+            write_legacy_csv = true
+            "#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("unknown field"));
+        assert!(err.to_string().contains("write_legacy_csv"));
+
+        let err = toml::from_str::<Config>(
+            r#"
+            [simulation]
+            reaction_byproduct_strenght = 1.0
+            "#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("unknown field"));
+        assert!(err.to_string().contains("reaction_byproduct_strenght"));
+
+        let err = toml::from_str::<Config>(
+            r#"
+            [simulation]
+            boundary_sources = [
+                { species = 4, face = "bottom", amount = 0.25 },
+            ]
+            "#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("unknown field"));
+        assert!(err.to_string().contains("amount"));
     }
 
     #[test]
