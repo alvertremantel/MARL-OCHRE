@@ -16,8 +16,8 @@
 //! Each simulation tick, every cell runs through five phases in order:
 //!
 //! 1. **Receptor pass** — sense external chemical concentrations using
-//!    Hill-function activations. (Currently computed but not yet wired
-//!    to gate downstream phases.)
+//!    Hill-function activations. Transporters can evolve receptor gates
+//!    that amplify or suppress membrane flux from these activations.
 //!
 //! 2. **Transport pass** — move chemicals across the cell membrane.
 //!    Uptake brings external species into the cell; secretion pushes
@@ -352,31 +352,15 @@ impl CellState {
         }
 
         let mut accepted_secretion_by_int = [0.0f32; M_INT];
+        let mut accepted_secretion = [0.0f32; S_TRANSPORTERS];
         for i in 0..S_TRANSPORTERS {
             if !valid_transport[i] {
                 continue;
             }
             let int_idx = transport_int[i];
-            let ext_idx = transport_ext[i];
             let amount = secretion_request[i] * secretion_scale_by_int[int_idx];
             accepted_secretion_by_int[int_idx] += amount;
-            field_deltas[ext_idx] += amount;
-            if amount > 0.0
-                && record_full_stoich
-                && let Some(ledger) = stoich.as_deref_mut()
-            {
-                ledger.record(
-                    StoichRecord::new(
-                        StoichStage::CellTransport,
-                        StoichEventKind::Transport,
-                        amount,
-                    )
-                    .model_delta(transfer_delta(ext_idx, int_idx, -amount))
-                    .actor(self.lineage_id)
-                    .species(ext_idx),
-                    keep_stoich_events,
-                );
-            }
+            accepted_secretion[i] = amount;
         }
 
         let mut uptake_scale_by_ext = [1.0f32; S_EXT];
@@ -412,13 +396,76 @@ impl CellState {
         }
 
         let mut accepted_uptake_by_int = [0.0f32; M_INT];
+        let mut accepted_uptake = [0.0f32; S_TRANSPORTERS];
+        for i in 0..S_TRANSPORTERS {
+            if !valid_transport[i] {
+                continue;
+            }
+            let int_idx = transport_int[i];
+            let amount = provisional_uptake[i] * uptake_scale_by_int[int_idx];
+            accepted_uptake_by_int[int_idx] += amount;
+            accepted_uptake[i] = amount;
+        }
+
+        let requested_transport_energy_cost = (0..S_TRANSPORTERS)
+            .filter(|&i| valid_transport[i])
+            .map(|i| {
+                let ext_idx = transport_ext[i];
+                (accepted_secretion[i] + accepted_uptake[i])
+                    * sim.transport_energy_cost_per_unit(ext_idx)
+            })
+            .sum::<f32>();
+        let net_energy_transport = accepted_uptake_by_int[0] - accepted_secretion_by_int[0];
+        let energy_available = self.internal[0].max(0.0);
+        let transport_scale = if requested_transport_energy_cost <= 0.0
+            || !requested_transport_energy_cost.is_finite()
+        {
+            1.0
+        } else {
+            let uncovered_cost = requested_transport_energy_cost - net_energy_transport;
+            if uncovered_cost <= 0.0 {
+                1.0
+            } else {
+                (energy_available / uncovered_cost).clamp(0.0, 1.0)
+            }
+        };
+
+        accepted_secretion_by_int = [0.0; M_INT];
+        accepted_uptake_by_int = [0.0; M_INT];
         for i in 0..S_TRANSPORTERS {
             if !valid_transport[i] {
                 continue;
             }
             let int_idx = transport_int[i];
             let ext_idx = transport_ext[i];
-            let amount = provisional_uptake[i] * uptake_scale_by_int[int_idx];
+            let amount = accepted_secretion[i] * transport_scale;
+            accepted_secretion_by_int[int_idx] += amount;
+            field_deltas[ext_idx] += amount;
+            if amount > 0.0
+                && record_full_stoich
+                && let Some(ledger) = stoich.as_deref_mut()
+            {
+                ledger.record(
+                    StoichRecord::new(
+                        StoichStage::CellTransport,
+                        StoichEventKind::Transport,
+                        amount,
+                    )
+                    .model_delta(transfer_delta(ext_idx, int_idx, -amount))
+                    .actor(self.lineage_id)
+                    .species(ext_idx),
+                    keep_stoich_events,
+                );
+            }
+        }
+
+        for i in 0..S_TRANSPORTERS {
+            if !valid_transport[i] {
+                continue;
+            }
+            let int_idx = transport_int[i];
+            let ext_idx = transport_ext[i];
+            let amount = accepted_uptake[i] * transport_scale;
             accepted_uptake_by_int[int_idx] += amount;
             field_deltas[ext_idx] -= amount;
             if amount > 0.0
@@ -443,6 +490,26 @@ impl CellState {
             self.internal[int_idx] = (self.internal[int_idx] - accepted_secretion_by_int[int_idx]
                 + accepted_uptake_by_int[int_idx])
                 .clamp(0.0, sim.c_max);
+        }
+
+        let transport_energy_cost = requested_transport_energy_cost * transport_scale;
+        self.internal[0] = (self.internal[0] - transport_energy_cost).max(0.0);
+        if record_full_stoich
+            && transport_energy_cost > 0.0
+            && let Some(ledger) = stoich.as_deref_mut()
+        {
+            ledger.record(
+                StoichRecord::new(
+                    StoichStage::CellTransport,
+                    StoichEventKind::TransportEnergyCost,
+                    transport_energy_cost,
+                )
+                .model_delta(internal_delta(0, -transport_energy_cost))
+                .balancing_reservoir(StoichReservoir::HeatSink)
+                .actor(self.lineage_id)
+                .species(0),
+                keep_stoich_events,
+            );
         }
 
         // Light is stored as a pseudo-internal concentration so reactions can use it as catalyst.
@@ -1047,6 +1114,137 @@ mod tests {
 
         assert!((cell.internal[2] - 0.1).abs() < 1e-6);
         assert!((deltas[2] + 0.1).abs() < 1e-6);
+    }
+
+    #[test]
+    fn accepted_transport_flux_pays_descriptor_energy_cost() {
+        let mut ruleset = test_ruleset();
+        ruleset.transport[0] = TransportParams {
+            uptake_rate: 100.0,
+            secrete_rate: 0.0,
+            ext_species: EXT_REDUCTANT as u8,
+            int_species: 2,
+            gate_receptor: 0,
+            gate_weight: 0.0,
+        };
+        let sim = SimulationConfig {
+            lambda_maintenance: 0.0,
+            ..SimulationConfig::default()
+        };
+        let mut cell = test_cell(ruleset);
+        let mut ext = [0.0f32; S_EXT];
+        ext[EXT_REDUCTANT] = 1.0;
+
+        let (deltas, _) = cell.tick(&ext, 0.0, &sim);
+
+        let expected_cost = sim.transport_energy_cost_per_unit(EXT_REDUCTANT);
+        assert!((cell.internal[2] - 1.0).abs() < 1e-6);
+        assert!((deltas[EXT_REDUCTANT] + 1.0).abs() < 1e-6);
+        assert!((cell.internal[0] - (10.0 - expected_cost)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn zero_energy_cell_cannot_move_costed_nonenergy_flux() {
+        let mut ruleset = test_ruleset();
+        ruleset.transport[0] = TransportParams {
+            uptake_rate: 100.0,
+            secrete_rate: 0.0,
+            ext_species: EXT_REDUCTANT as u8,
+            int_species: 2,
+            gate_receptor: 0,
+            gate_weight: 0.0,
+        };
+        let sim = SimulationConfig {
+            lambda_maintenance: 0.0,
+            ..SimulationConfig::default()
+        };
+        let mut cell = test_cell(ruleset);
+        cell.internal[0] = 0.0;
+        let mut ext = [0.0f32; S_EXT];
+        ext[EXT_REDUCTANT] = 1.0;
+
+        let (deltas, _) = cell.tick(&ext, 0.0, &sim);
+
+        assert_eq!(cell.internal[2], 0.0);
+        assert_eq!(deltas[EXT_REDUCTANT], 0.0);
+        assert_eq!(cell.internal[0], 0.0);
+    }
+
+    #[test]
+    fn scarce_energy_scales_transport_flux_and_audit_amounts() {
+        let mut ruleset = test_ruleset();
+        ruleset.transport[0] = TransportParams {
+            uptake_rate: 100.0,
+            secrete_rate: 0.0,
+            ext_species: EXT_REDUCTANT as u8,
+            int_species: 2,
+            gate_receptor: 0,
+            gate_weight: 0.0,
+        };
+        let sim = SimulationConfig {
+            lambda_maintenance: 0.0,
+            ..SimulationConfig::default()
+        };
+        let full_cost = sim.transport_energy_cost_per_unit(EXT_REDUCTANT);
+        let mut cell = test_cell(ruleset);
+        cell.internal[0] = full_cost * 0.5;
+        let mut ext = [0.0f32; S_EXT];
+        ext[EXT_REDUCTANT] = 1.0;
+        let mut ledger = StoichTickLedger::default();
+
+        let (deltas, _) = cell.tick_with_stoich(&ext, 0.0, &sim, Some(&mut ledger), true, true);
+
+        assert!((cell.internal[2] - 0.5).abs() < 1e-6);
+        assert!((deltas[EXT_REDUCTANT] + 0.5).abs() < 1e-6);
+        assert!(cell.internal[0].abs() < 1e-6);
+
+        let transport_event = ledger
+            .events
+            .iter()
+            .find(|event| event.kind == StoichEventKind::Transport)
+            .expect("scaled transport event should be recorded");
+        let cost_event = ledger
+            .events
+            .iter()
+            .find(|event| event.kind == StoichEventKind::TransportEnergyCost)
+            .expect("scaled transport cost event should be recorded");
+        assert!((transport_event.amount - 0.5).abs() < 1e-6);
+        assert!((cost_event.amount - full_cost * 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn transport_energy_cost_is_audited_as_heat_loss() {
+        let mut ruleset = test_ruleset();
+        ruleset.transport[0] = TransportParams {
+            uptake_rate: 100.0,
+            secrete_rate: 0.0,
+            ext_species: EXT_STRUCTURAL as u8,
+            int_species: 7,
+            gate_receptor: 0,
+            gate_weight: 0.0,
+        };
+        let sim = SimulationConfig {
+            lambda_maintenance: 0.0,
+            stoich_enforcement: marl_config::stoich::StoichEnforcement::Audit,
+            ..SimulationConfig::default()
+        };
+        let mut cell = test_cell(ruleset);
+        let mut ext = [0.0f32; S_EXT];
+        ext[EXT_STRUCTURAL] = 1.0;
+        let mut ledger = StoichTickLedger::default();
+
+        cell.tick_with_stoich(&ext, 0.0, &sim, Some(&mut ledger), true, true);
+
+        let cost_event = ledger
+            .events
+            .iter()
+            .find(|event| event.kind == StoichEventKind::TransportEnergyCost)
+            .expect("transport cost event should be recorded");
+        let expected_cost = sim.transport_energy_cost_per_unit(EXT_STRUCTURAL);
+        assert!((cost_event.amount - expected_cost).abs() < 1e-6);
+        assert!(cost_event.balanced);
+        assert!((cost_event.model_delta.energy + expected_cost).abs() < 1e-6);
+        assert!((cost_event.reservoir_delta.energy - expected_cost).abs() < 1e-6);
     }
 
     #[test]

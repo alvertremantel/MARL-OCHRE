@@ -84,3 +84,23 @@ for the current external species and pin the current decay profile to descriptor
 defaults. This does not yet change simulation dynamics. It gives the codebase a
 shared vocabulary for future behavior and analysis while keeping the current
 model stable.
+
+## Current Status
+
+- Descriptor catalog: implemented in `marl-config`.
+- Analysis/diagnostics: implemented in `marl-analysis` and `marl-analyze`; run
+  reports now include role labels and descriptor summaries for tracked external
+  species.
+- Passive physics defaults: diffusion and decay defaults now come from the
+  descriptor catalog.
+- Membrane crossing cost: accepted transporter flux now pays an internal-energy
+  cost derived from each external molecule's permeability and composition load.
+  This is configurable through `transport_energy_cost_scale`,
+  `transport_permeability_cost_weight`, and
+  `transport_composition_cost_weight`; setting the scale to `0.0` restores the
+  previous free-transport behavior for control runs.
+
+The next implementation target is reaction compatibility: descriptors should
+start constraining or weighting which substrate/product/cofactor moves are
+chemically plausible, and bond-energy/work-coupling should affect how much of a
+reaction's potential becomes useful internal work versus leakage or heat.

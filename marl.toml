@@ -38,6 +38,9 @@ c_max = 10.0
 lambda_maintenance = 0.12
 hard_death_floor = 0.01
 reaction_maintenance = 0.003
+transport_energy_cost_scale = 0.02
+transport_permeability_cost_weight = 1.0
+transport_composition_cost_weight = 0.5
 
 base_division_prep = 20.0
 prep_maintenance_multiplier = 2.0

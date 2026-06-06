@@ -157,6 +157,9 @@ Core physics and biology parameters:
 | `lambda_maintenance` | f32 | 0.12 | Base maintenance cost per tick |
 | `hard_death_floor` | f32 | 0.01 | Energy below which cells die regardless of evolved threshold |
 | `reaction_maintenance` | f32 | 0.003 | Per-active-reaction cost per tick |
+| `transport_energy_cost_scale` | f32 | 0.02 | Descriptor-derived internal-energy cost per accepted membrane flux unit; set to `0.0` for legacy free transport |
+| `transport_permeability_cost_weight` | f32 | 1.0 | Weight for the cost of moving poorly permeable external molecules |
+| `transport_composition_cost_weight` | f32 | 0.5 | Weight for the size-like cost of moving compositionally richer molecules |
 | `base_division_prep` | f32 | 20.0 | Tick count for full division prep |
 | `prep_maintenance_multiplier` | f32 | 2.0 | Maintenance multiplier during division prep |
 | `rush_penalty_rate` | f32 | 0.05 | Penalty for evolving shorter division prep |

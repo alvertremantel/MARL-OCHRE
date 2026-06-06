@@ -304,6 +304,17 @@ pub fn default_external_decay() -> [f32; S_EXT] {
     out
 }
 
+fn descriptor_composition_load(composition: &ChemicalComposition) -> f32 {
+    composition.carbon_backbone.max(0.0)
+        + composition.oxidizing_power.max(0.0)
+        + composition.reducing_power.max(0.0)
+        + composition.phosphate_like_activation.max(0.0)
+        + composition.lipid_like_tail.max(0.0)
+        + composition.signal_group.max(0.0)
+        + composition.structural_group.max(0.0)
+        + composition.toxin_group.max(0.0)
+}
+
 // ============================================================================
 // RUNTIME CONFIGURATION — SimulationConfig + OutputConfig
 // ============================================================================
@@ -465,6 +476,9 @@ pub struct SimulationConfig {
     pub lambda_maintenance: f32,
     pub hard_death_floor: f32,
     pub reaction_maintenance: f32,
+    pub transport_energy_cost_scale: f32,
+    pub transport_permeability_cost_weight: f32,
+    pub transport_composition_cost_weight: f32,
 
     // Cell cycle
     pub base_division_prep: f32,
@@ -542,6 +556,9 @@ impl Default for SimulationConfig {
             lambda_maintenance: 0.12,
             hard_death_floor: 0.01,
             reaction_maintenance: 0.003,
+            transport_energy_cost_scale: 0.02,
+            transport_permeability_cost_weight: 1.0,
+            transport_composition_cost_weight: 0.5,
 
             base_division_prep: 20.0,
             prep_maintenance_multiplier: 2.0,
@@ -639,7 +656,39 @@ impl SimulationConfig {
         ]
     }
 
+    pub fn transport_energy_cost_per_unit(&self, species: usize) -> f32 {
+        let descriptor = external_species_descriptor(species);
+        let permeability = descriptor.membrane_permeability.clamp(0.0, 1.0);
+        let permeability_cost =
+            (1.0 - permeability) * self.transport_permeability_cost_weight.max(0.0);
+        let composition_cost = descriptor_composition_load(&descriptor.composition)
+            * self.transport_composition_cost_weight.max(0.0);
+        let cost =
+            self.transport_energy_cost_scale.max(0.0) * (permeability_cost + composition_cost);
+        if cost.is_finite() { cost } else { 0.0 }
+    }
+
     pub fn validate_chemistry(&self) -> Result<(), String> {
+        for (name, value) in [
+            (
+                "transport_energy_cost_scale",
+                self.transport_energy_cost_scale,
+            ),
+            (
+                "transport_permeability_cost_weight",
+                self.transport_permeability_cost_weight,
+            ),
+            (
+                "transport_composition_cost_weight",
+                self.transport_composition_cost_weight,
+            ),
+        ] {
+            if !value.is_finite() || value < 0.0 {
+                return Err(format!(
+                    "{name} must be finite and nonnegative, got {value}"
+                ));
+            }
+        }
         for source in self.effective_boundary_sources() {
             source.validate()?;
         }
@@ -909,6 +958,25 @@ mod tests {
     }
 
     #[test]
+    fn transport_cost_comes_from_permeability_and_composition() {
+        let sim = SimulationConfig::default();
+        assert!(sim.transport_energy_cost_per_unit(EXT_ENERGY) > 0.0);
+        assert!(
+            sim.transport_energy_cost_per_unit(EXT_STRUCTURAL)
+                > sim.transport_energy_cost_per_unit(EXT_CARBON)
+        );
+
+        let free_transport = SimulationConfig {
+            transport_energy_cost_scale: 0.0,
+            ..SimulationConfig::default()
+        };
+        assert_eq!(
+            free_transport.transport_energy_cost_per_unit(EXT_STRUCTURAL),
+            0.0
+        );
+    }
+
+    #[test]
     fn grid_defaults_and_toml_override_work() {
         let cfg = Config::default();
         assert_eq!(cfg.grid, GridDims::default());
@@ -1080,6 +1148,16 @@ mod tests {
             face: BoundaryFace::Top,
             concentration: f32::NAN,
         }];
+        assert!(sim.validate_chemistry().is_err());
+
+        let mut sim = SimulationConfig {
+            transport_energy_cost_scale: -1.0,
+            ..Default::default()
+        };
+        assert!(sim.validate_chemistry().is_err());
+
+        sim.transport_energy_cost_scale = 0.0;
+        sim.transport_permeability_cost_weight = f32::NAN;
         assert!(sim.validate_chemistry().is_err());
     }
 

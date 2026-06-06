@@ -110,7 +110,7 @@ A zero `gate_weight` keeps transport unconditional. Positive weights amplify tra
 
 ### 2. Transport Pass
 
-Transporters move chemicals between extracellular species and internal pools. Uptake and secretion are saturating functions, then receptor-gated through the per-transporter factor above. Starter metabolisms use neutral gates, so they begin with the same unconditional transport behavior and must evolve useful gating through mutation.
+Transporters move chemicals between extracellular species and internal pools. Uptake and secretion are saturating functions, then receptor-gated through the per-transporter factor above. Accepted membrane flux pays an internal-energy cost derived from the external molecule descriptor: poorly permeable and compositionally rich molecules are harder to move. Starter metabolisms use neutral gates, so they begin with the same unconditional transport behavior and must evolve useful gating through mutation.
 
 Cells do not read the chemistry in their own occupied voxel. Instead, they average the chemistry of empty face-neighbor voxels. This is an important and deliberate choice: chemicals live in extracellular space, not inside the body-occupied voxel.
 
