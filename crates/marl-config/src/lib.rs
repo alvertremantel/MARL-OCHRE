@@ -98,6 +98,30 @@ impl ExternalSpeciesDescriptor {
     }
 }
 
+fn enzyme_descriptor(species: usize, name: &'static str) -> ExternalSpeciesDescriptor {
+    ExternalSpeciesDescriptor {
+        species,
+        name,
+        composition: ChemicalComposition {
+            carbon_backbone: 0.8,
+            oxidizing_power: 0.0,
+            reducing_power: 0.0,
+            phosphate_like_activation: 0.0,
+            lipid_like_tail: 0.0,
+            signal_group: 0.0,
+            structural_group: 0.8,
+            toxin_group: 0.0,
+        },
+        bond_energy: 0.15,
+        extracellular_stability: 0.4,
+        membrane_permeability: 0.0,
+        storage_density: 0.1,
+        work_coupling: 0.05,
+        default_diffusion: 0.0,
+        default_decay: 0.0,
+    }
+}
+
 pub const EXTERNAL_SPECIES: [ExternalSpeciesDescriptor; S_EXT] = [
     ExternalSpeciesDescriptor {
         species: EXT_ENERGY,
@@ -284,6 +308,22 @@ pub fn external_species_descriptor(species: usize) -> ExternalSpeciesDescriptor 
         .unwrap_or_else(|| ExternalSpeciesDescriptor::inert(species, "unknown"))
 }
 
+pub fn internal_species_descriptor(species: usize) -> ExternalSpeciesDescriptor {
+    match species {
+        EXT_ENERGY | EXT_OXIDANT | EXT_REDUCTANT | EXT_CARBON | EXT_ORGANIC => {
+            external_species_descriptor(species)
+        }
+        5 => enzyme_descriptor(species, "enzyme_a"),
+        6 => enzyme_descriptor(species, "enzyme_b"),
+        7 => {
+            let mut descriptor = external_species_descriptor(EXT_STRUCTURAL);
+            descriptor.name = "carbon_reserve";
+            descriptor
+        }
+        _ => ExternalSpeciesDescriptor::inert(species, "inactive"),
+    }
+}
+
 pub fn default_external_diffusion() -> [f32; S_EXT] {
     let mut out = [0.0; S_EXT];
     let mut i = 0;
@@ -313,6 +353,25 @@ fn descriptor_composition_load(composition: &ChemicalComposition) -> f32 {
         + composition.signal_group.max(0.0)
         + composition.structural_group.max(0.0)
         + composition.toxin_group.max(0.0)
+}
+
+fn descriptor_composition_overlap(a: &ChemicalComposition, b: &ChemicalComposition) -> f32 {
+    let shared = a.carbon_backbone.min(b.carbon_backbone).max(0.0)
+        + a.oxidizing_power.min(b.oxidizing_power).max(0.0)
+        + a.reducing_power.min(b.reducing_power).max(0.0)
+        + a.phosphate_like_activation
+            .min(b.phosphate_like_activation)
+            .max(0.0)
+        + a.lipid_like_tail.min(b.lipid_like_tail).max(0.0)
+        + a.signal_group.min(b.signal_group).max(0.0)
+        + a.structural_group.min(b.structural_group).max(0.0)
+        + a.toxin_group.min(b.toxin_group).max(0.0);
+    let total = descriptor_composition_load(a).max(descriptor_composition_load(b));
+    if total <= f32::EPSILON {
+        1.0
+    } else {
+        (shared / total).clamp(0.0, 1.0)
+    }
 }
 
 // ============================================================================
@@ -479,6 +538,9 @@ pub struct SimulationConfig {
     pub transport_energy_cost_scale: f32,
     pub transport_permeability_cost_weight: f32,
     pub transport_composition_cost_weight: f32,
+    pub reaction_descriptor_coupling_strength: f32,
+    pub reaction_descriptor_min_factor: f32,
+    pub reaction_descriptor_max_factor: f32,
 
     // Cell cycle
     pub base_division_prep: f32,
@@ -559,6 +621,9 @@ impl Default for SimulationConfig {
             transport_energy_cost_scale: 0.02,
             transport_permeability_cost_weight: 1.0,
             transport_composition_cost_weight: 0.5,
+            reaction_descriptor_coupling_strength: 0.25,
+            reaction_descriptor_min_factor: 0.25,
+            reaction_descriptor_max_factor: 1.5,
 
             base_division_prep: 20.0,
             prep_maintenance_multiplier: 2.0,
@@ -668,6 +733,72 @@ impl SimulationConfig {
         if cost.is_finite() { cost } else { 0.0 }
     }
 
+    pub fn reaction_descriptor_factor(
+        &self,
+        substrate: usize,
+        product: usize,
+        cofactor: u8,
+    ) -> f32 {
+        let strength = self.reaction_descriptor_coupling_strength.max(0.0);
+        if strength <= f32::EPSILON {
+            return 1.0;
+        }
+
+        let substrate = internal_species_descriptor(substrate);
+        let product = internal_species_descriptor(product);
+        let cofactor = (cofactor != stoich::NO_COFACTOR)
+            .then(|| internal_species_descriptor(cofactor as usize));
+
+        let mut composition_fit = 0.5
+            + 0.5 * descriptor_composition_overlap(&substrate.composition, &product.composition);
+        if product.work_coupling >= 0.75 {
+            composition_fit = composition_fit.max(0.9);
+        }
+        let cofactor_bond = cofactor
+            .map(|descriptor| descriptor.bond_energy)
+            .unwrap_or(0.0);
+        let cofactor_redox = cofactor
+            .map(|descriptor| {
+                descriptor
+                    .composition
+                    .oxidizing_power
+                    .max(descriptor.composition.reducing_power)
+            })
+            .unwrap_or(0.0);
+        let energy_supply = substrate.bond_energy + 0.5 * cofactor_bond + 0.5 * cofactor_redox;
+        let energy_need = product.bond_energy * (0.5 + product.work_coupling);
+        let energy_fit = if energy_need <= 0.01 {
+            1.0
+        } else {
+            (0.5 + 0.5 * energy_supply / energy_need).clamp(0.25, 1.5)
+        };
+        let role_fit = if product.work_coupling >= 0.75 && energy_supply > 0.25 {
+            1.3
+        } else if product.storage_density >= 0.3 && substrate.composition.carbon_backbone > 0.2 {
+            1.1
+        } else if product.composition.structural_group >= 0.5
+            && substrate.composition.carbon_backbone > 0.2
+        {
+            1.05
+        } else if product.composition.signal_group >= 0.5
+            && substrate.composition.signal_group < 0.2
+        {
+            0.75
+        } else {
+            1.0
+        };
+
+        let raw = composition_fit * energy_fit * role_fit;
+        let factor = 1.0 + strength * (raw - 1.0);
+        let min = self.reaction_descriptor_min_factor.max(0.0);
+        let max = self.reaction_descriptor_max_factor.max(min);
+        if factor.is_finite() {
+            factor.clamp(min, max)
+        } else {
+            1.0
+        }
+    }
+
     pub fn validate_chemistry(&self) -> Result<(), String> {
         for (name, value) in [
             (
@@ -682,12 +813,30 @@ impl SimulationConfig {
                 "transport_composition_cost_weight",
                 self.transport_composition_cost_weight,
             ),
+            (
+                "reaction_descriptor_coupling_strength",
+                self.reaction_descriptor_coupling_strength,
+            ),
+            (
+                "reaction_descriptor_min_factor",
+                self.reaction_descriptor_min_factor,
+            ),
+            (
+                "reaction_descriptor_max_factor",
+                self.reaction_descriptor_max_factor,
+            ),
         ] {
             if !value.is_finite() || value < 0.0 {
                 return Err(format!(
                     "{name} must be finite and nonnegative, got {value}"
                 ));
             }
+        }
+        if self.reaction_descriptor_max_factor < self.reaction_descriptor_min_factor {
+            return Err(format!(
+                "reaction_descriptor_max_factor ({}) must be >= reaction_descriptor_min_factor ({})",
+                self.reaction_descriptor_max_factor, self.reaction_descriptor_min_factor
+            ));
         }
         for source in self.effective_boundary_sources() {
             source.validate()?;
@@ -977,6 +1126,29 @@ mod tests {
     }
 
     #[test]
+    fn reaction_descriptor_factor_uses_bond_energy_and_roles() {
+        let sim = SimulationConfig::default();
+        let energy_factor =
+            sim.reaction_descriptor_factor(EXT_REDUCTANT, EXT_ENERGY, EXT_OXIDANT as u8);
+        let toxicity_factor =
+            sim.reaction_descriptor_factor(EXT_ENERGY, EXT_CARBON, EXT_OXIDANT as u8);
+        let reserve_factor = sim.reaction_descriptor_factor(EXT_CARBON, 7, 0xFF);
+        let inactive_factor = sim.reaction_descriptor_factor(EXT_CARBON, 8, 0xFF);
+        assert!(energy_factor > toxicity_factor);
+        assert!(energy_factor > 1.0);
+        assert!(reserve_factor > inactive_factor);
+
+        let disabled = SimulationConfig {
+            reaction_descriptor_coupling_strength: 0.0,
+            ..SimulationConfig::default()
+        };
+        assert_eq!(
+            disabled.reaction_descriptor_factor(EXT_REDUCTANT, EXT_ENERGY, EXT_OXIDANT as u8),
+            1.0
+        );
+    }
+
+    #[test]
     fn grid_defaults_and_toml_override_work() {
         let cfg = Config::default();
         assert_eq!(cfg.grid, GridDims::default());
@@ -1158,6 +1330,13 @@ mod tests {
 
         sim.transport_energy_cost_scale = 0.0;
         sim.transport_permeability_cost_weight = f32::NAN;
+        assert!(sim.validate_chemistry().is_err());
+
+        let sim = SimulationConfig {
+            reaction_descriptor_min_factor: 2.0,
+            reaction_descriptor_max_factor: 1.0,
+            ..Default::default()
+        };
         assert!(sim.validate_chemistry().is_err());
     }
 

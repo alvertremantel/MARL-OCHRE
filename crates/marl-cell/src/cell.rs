@@ -543,6 +543,9 @@ impl CellState {
             let substrate_term = s / (rxn.k_m + s + f32::EPSILON);
             let catalyst_term = sim.epsilon + c / (rxn.k_cat + c + f32::EPSILON);
             let mut rate = rxn.v_max * substrate_term * catalyst_term;
+            if !sim.stoich_enforcement.is_strict() {
+                rate *= sim.reaction_descriptor_factor(sub_idx, prod_idx, rxn.cofactor);
+            }
 
             // Optional cofactor
             if rxn.cofactor != 0xFF {
@@ -1520,6 +1523,52 @@ mod tests {
 
         assert!(cell.internal[2].abs() < 1e-6);
         assert!((cell.internal[3] - 0.1).abs() < 1e-6);
+    }
+
+    #[test]
+    fn descriptor_coupling_scales_reaction_flux_but_strict_mode_skips_it() {
+        let mut ruleset = test_ruleset();
+        ruleset.reactions[0] = Reaction {
+            substrate: EXT_CARBON as u8,
+            product: EXT_ENERGY as u8,
+            catalyst: LIGHT_SPECIES as u8,
+            cofactor: 0xFF,
+            k_m: 1.0,
+            v_max: 0.05,
+            k_cat: 1.0,
+        };
+
+        let legacy_sim = SimulationConfig {
+            lambda_maintenance: 0.0,
+            reaction_maintenance: 0.0,
+            reaction_descriptor_coupling_strength: 0.0,
+            ..SimulationConfig::default()
+        };
+        let coupled_sim = SimulationConfig {
+            reaction_descriptor_coupling_strength: 1.0,
+            ..legacy_sim.clone()
+        };
+        let strict_sim = SimulationConfig {
+            stoich_enforcement: marl_config::stoich::StoichEnforcement::Strict,
+            reaction_descriptor_coupling_strength: 1.0,
+            ..legacy_sim.clone()
+        };
+        let mut legacy = test_cell(ruleset.clone());
+        let mut coupled = test_cell(ruleset.clone());
+        let mut strict = test_cell(ruleset);
+        legacy.internal[EXT_CARBON] = 10.0;
+        coupled.internal[EXT_CARBON] = 10.0;
+        strict.internal[EXT_CARBON] = 10.0;
+
+        legacy.tick(&[0.0; S_EXT], 1.0, &legacy_sim);
+        coupled.tick(&[0.0; S_EXT], 1.0, &coupled_sim);
+        strict.tick(&[0.0; S_EXT], 1.0, &strict_sim);
+
+        let legacy_flux = legacy.internal[EXT_ENERGY] - 10.0;
+        let coupled_flux = coupled.internal[EXT_ENERGY] - 10.0;
+        let expected_factor = coupled_sim.reaction_descriptor_factor(EXT_CARBON, EXT_ENERGY, 0xFF);
+        assert!((coupled_flux - legacy_flux * expected_factor).abs() < 1e-6);
+        assert!((strict.internal[EXT_ENERGY] - legacy.internal[EXT_ENERGY]).abs() < 1e-6);
     }
 
     #[test]

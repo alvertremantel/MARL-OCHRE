@@ -160,6 +160,9 @@ Core physics and biology parameters:
 | `transport_energy_cost_scale` | f32 | 0.02 | Descriptor-derived internal-energy cost per accepted membrane flux unit; set to `0.0` for legacy free transport |
 | `transport_permeability_cost_weight` | f32 | 1.0 | Weight for the cost of moving poorly permeable external molecules |
 | `transport_composition_cost_weight` | f32 | 0.5 | Weight for the size-like cost of moving compositionally richer molecules |
+| `reaction_descriptor_coupling_strength` | f32 | 0.25 | Strength of descriptor-derived reaction-rate weighting; set to `0.0` for legacy slot-only reaction rates |
+| `reaction_descriptor_min_factor` | f32 | 0.25 | Minimum descriptor multiplier for reaction rates |
+| `reaction_descriptor_max_factor` | f32 | 1.5 | Maximum descriptor multiplier for reaction rates |
 | `base_division_prep` | f32 | 20.0 | Tick count for full division prep |
 | `prep_maintenance_multiplier` | f32 | 2.0 | Maintenance multiplier during division prep |
 | `rush_penalty_rate` | f32 | 0.05 | Penalty for evolving shorter division prep |

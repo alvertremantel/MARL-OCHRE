@@ -99,8 +99,15 @@ model stable.
   `transport_permeability_cost_weight`, and
   `transport_composition_cost_weight`; setting the scale to `0.0` restores the
   previous free-transport behavior for control runs.
+- Reaction compatibility: non-strict reaction rates are now weighted by
+  descriptor-derived substrate/product/cofactor compatibility. Bond energy,
+  work-coupling, and composition overlap make some transformations more or less
+  efficient without forbidding useless evolved reactions outright. Strict
+  stoichiometry deliberately keeps exact template-balanced reaction dynamics and
+  skips this descriptor multiplier until the strict template catalog itself is
+  descriptor-aware.
 
-The next implementation target is reaction compatibility: descriptors should
-start constraining or weighting which substrate/product/cofactor moves are
-chemically plausible, and bond-energy/work-coupling should affect how much of a
-reaction's potential becomes useful internal work versus leakage or heat.
+The next implementation target is reaction leakage and byproducts: descriptor
+compatibility should not only change reaction speed, but also determine how
+much potential becomes useful internal work versus heat, waste, or secreted
+cross-feeding products.
