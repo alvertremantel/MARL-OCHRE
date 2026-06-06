@@ -366,7 +366,11 @@ species has evolved uptake pressure and low final retention; a public-pool
 candidate means it accumulated without detected uptake pressure.
 The byproduct calibration section reports the field and ruleset ticks used for
 those proxies. Aggregate retained fraction is omitted when any produced
-byproduct species is missing from the field snapshot coverage.
+byproduct species is missing from the field snapshot coverage. Single-run
+retained fractions are gross field-pool ratios; comparison reports also compute
+control-adjusted excess pools when a comparable zero-byproduct baseline run is
+included. The baseline must have v2 event data, a chemistry snapshot, matching
+grid dimensions, and the same calibration field tick.
 
 By default, analysis reads the full `ticks.csv` trajectory and samples the
 first, middle, and latest binary snapshots. Use `--all-snapshots`,

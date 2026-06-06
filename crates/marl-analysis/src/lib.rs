@@ -90,6 +90,8 @@ pub struct RunComparisonEntry {
     pub reaction_leakage_energy_to_heat: Option<f64>,
     pub byproduct_final_pool: Option<f64>,
     pub byproduct_retained_fraction: Option<f64>,
+    pub byproduct_excess_final_pool: Option<f64>,
+    pub byproduct_excess_retained_fraction: Option<f64>,
     pub byproduct_cross_feeding_candidates: Option<u64>,
     pub byproduct_public_pool_candidates: Option<u64>,
 }
@@ -570,7 +572,7 @@ pub fn compare_runs(
     run_dirs: &[PathBuf],
     cfg: &AnalysisConfig,
 ) -> AnalysisResult<ComparisonAnalysis> {
-    let mut runs = Vec::new();
+    let mut analyses = Vec::new();
     let mut warnings = Vec::new();
     for run_dir in run_dirs {
         match analyze_run(run_dir, cfg) {
@@ -581,11 +583,16 @@ pub fn compare_runs(
                         .iter()
                         .map(|warning| format!("{}: {warning}", run_name(&analysis.run_dir))),
                 );
-                runs.push(RunComparisonEntry::from_analysis(&analysis));
+                analyses.push(analysis);
             }
             Err(err) => warnings.push(format!("{}: analysis failed: {err}", run_name(run_dir))),
         }
     }
+    let mut runs = analyses
+        .iter()
+        .map(RunComparisonEntry::from_analysis)
+        .collect::<Vec<_>>();
+    warnings.extend(apply_byproduct_baseline_adjustment(&analyses, &mut runs));
     let findings = classify_comparison_findings(&runs);
     Ok(ComparisonAnalysis {
         runs,
@@ -871,7 +878,7 @@ pub fn render_comparison_terminal(analysis: &ComparisonAnalysis) -> String {
     out.push_str("MARL run comparison\n");
     for run in &analysis.runs {
         out.push_str(&format!(
-            "  {}: final_pop={:?}, growth={:?}, top={:?}, dominant_genotype={:?}, active_transporters={:?}, byproduct={}, retained={}, leakage_heat={}\n",
+            "  {}: final_pop={:?}, growth={:?}, top={:?}, dominant_genotype={:?}, active_transporters={:?}, byproduct={}, gross_retained={}, excess_retained={}, leakage_heat={}\n",
             run.name,
             run.final_population,
             run.growth_factor.map(|v| format!("{v:.2}x")),
@@ -884,6 +891,9 @@ pub fn render_comparison_terminal(analysis: &ComparisonAnalysis) -> String {
                 .map(|value| format!("{value:.4}"))
                 .unwrap_or_else(|| "n/a".to_string()),
             run.byproduct_retained_fraction
+                .map(|value| format!("{value:.3}"))
+                .unwrap_or_else(|| "n/a".to_string()),
+            run.byproduct_excess_retained_fraction
                 .map(|value| format!("{value:.3}"))
                 .unwrap_or_else(|| "n/a".to_string()),
             run.reaction_leakage_energy_to_heat
@@ -1282,11 +1292,11 @@ pub fn render_comparison_markdown(analysis: &ComparisonAnalysis) -> String {
         .any(|run| run.stoich_total_events.is_some())
     {
         out.push_str("\n## Stoichiometry V2 Comparison\n\n");
-        out.push_str("| run | events | imbalanced | byproduct_events | byproduct_amount | final_byproduct_pool | retained_fraction | cross_feed_candidates | public_pool_candidates | leakage_events | leakage_heat |\n");
-        out.push_str("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n");
+        out.push_str("| run | events | imbalanced | byproduct_events | byproduct_amount | gross_final_byproduct_pool | gross_retained_fraction | excess_final_byproduct_pool | excess_retained_fraction | cross_feed_candidates | public_pool_candidates | leakage_events | leakage_heat |\n");
+        out.push_str("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n");
         for run in &analysis.runs {
             out.push_str(&format!(
-                "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+                "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
                 run.name,
                 display_opt_u64(run.stoich_total_events),
                 display_opt_u64(run.stoich_imbalanced_events),
@@ -1294,6 +1304,8 @@ pub fn render_comparison_markdown(analysis: &ComparisonAnalysis) -> String {
                 display_opt_f64(run.reaction_byproduct_amount),
                 display_opt_f64(run.byproduct_final_pool),
                 display_opt_f64(run.byproduct_retained_fraction),
+                display_opt_f64(run.byproduct_excess_final_pool),
+                display_opt_f64(run.byproduct_excess_retained_fraction),
                 display_opt_u64(run.byproduct_cross_feeding_candidates),
                 display_opt_u64(run.byproduct_public_pool_candidates),
                 display_opt_u64(run.reaction_leakage_events),
@@ -1632,6 +1644,79 @@ fn classify_byproduct_calibration(
     } else {
         "production_only"
     }
+}
+
+fn apply_byproduct_baseline_adjustment(
+    analyses: &[RunAnalysis],
+    runs: &mut [RunComparisonEntry],
+) -> Vec<String> {
+    let mut warnings = Vec::new();
+    let baseline_candidates = analyses
+        .iter()
+        .zip(runs.iter())
+        .filter(|(analysis, run)| {
+            run.reaction_byproduct_amount == Some(0.0) && analysis.chemistry.last().is_some()
+        })
+        .collect::<Vec<_>>();
+    let Some((baseline_analysis, _)) = baseline_candidates.first().copied() else {
+        return warnings;
+    };
+    if baseline_candidates.len() > 1 {
+        warnings.push(format!(
+            "byproduct excess baseline: using {} as the first zero-byproduct baseline; {} additional baseline candidates ignored",
+            run_name(&baseline_analysis.run_dir),
+            baseline_candidates.len() - 1
+        ));
+    }
+    let Some(baseline_chemistry) = baseline_analysis.chemistry.last() else {
+        return warnings;
+    };
+
+    for (analysis, run) in analyses.iter().zip(runs.iter_mut()) {
+        let Some(calibration) = &analysis.byproduct_calibration else {
+            continue;
+        };
+        let Some(produced) = run.reaction_byproduct_amount.filter(|amount| *amount > 0.0) else {
+            continue;
+        };
+        if analysis.grid != baseline_analysis.grid {
+            warnings.push(format!(
+                "{}: byproduct excess baseline skipped because grid {:?} differs from baseline {:?}",
+                run.name, analysis.grid, baseline_analysis.grid
+            ));
+            continue;
+        }
+        if calibration.field_tick != Some(baseline_chemistry.tick) {
+            warnings.push(format!(
+                "{}: byproduct excess baseline skipped because field tick {:?} differs from baseline tick {}",
+                run.name, calibration.field_tick, baseline_chemistry.tick
+            ));
+            continue;
+        }
+        let mut excess_pool = 0.0;
+        let mut complete = true;
+        for species in &calibration.species {
+            let Some(run_total) = species.final_field_total else {
+                complete = false;
+                break;
+            };
+            let Some(baseline_total) = baseline_chemistry
+                .species_profiles
+                .iter()
+                .find(|profile| profile.species as i16 == species.species_index)
+                .map(|profile| profile.total_concentration)
+            else {
+                complete = false;
+                break;
+            };
+            excess_pool += (run_total - baseline_total).max(0.0);
+        }
+        if complete {
+            run.byproduct_excess_final_pool = Some(excess_pool);
+            run.byproduct_excess_retained_fraction = Some(excess_pool / produced);
+        }
+    }
+    warnings
 }
 
 fn read_ticks_csv(run_dir: &Path) -> AnalysisResult<Vec<TickRow>> {
@@ -2662,6 +2747,28 @@ fn classify_comparison_findings(runs: &[RunComparisonEntry]) -> Vec<Finding> {
             Vec::new(),
         ));
     }
+    let excess_retained = runs
+        .iter()
+        .filter_map(|run| {
+            run.byproduct_excess_retained_fraction
+                .map(|fraction| (run, fraction))
+        })
+        .max_by(|(_, a), (_, b)| a.total_cmp(b));
+    if let Some((run, fraction)) = excess_retained
+        && fraction >= 0.75
+    {
+        findings.push(finding(
+            "comparison_byproduct_excess_pool_candidate",
+            FindingLevel::Warning,
+            "Control-adjusted byproduct pool accumulation",
+            format!(
+                "{} retained {:.1}% of produced byproduct as field excess over the zero-byproduct baseline.",
+                run.name,
+                fraction * 100.0
+            ),
+            Vec::new(),
+        ));
+    }
     findings
 }
 
@@ -2730,6 +2837,8 @@ impl RunComparisonEntry {
                 .and_then(|calibration| calibration.final_byproduct_pool),
             byproduct_retained_fraction: byproduct_calibration
                 .and_then(|calibration| calibration.retained_fraction),
+            byproduct_excess_final_pool: None,
+            byproduct_excess_retained_fraction: None,
             byproduct_cross_feeding_candidates: byproduct_calibration
                 .map(|calibration| calibration.cross_feeding_candidates),
             byproduct_public_pool_candidates: byproduct_calibration
@@ -3255,6 +3364,8 @@ mod tests {
             reaction_leakage_energy_to_heat: byproduct.map(|value| value / 2.0),
             byproduct_final_pool: byproduct.map(|value| value / 4.0),
             byproduct_retained_fraction: byproduct.map(|_| 0.25),
+            byproduct_excess_final_pool: byproduct.map(|value| value / 5.0),
+            byproduct_excess_retained_fraction: byproduct.map(|_| 0.2),
             byproduct_cross_feeding_candidates: byproduct.map(|_| 1),
             byproduct_public_pool_candidates: byproduct.map(|_| 0),
         };
@@ -3268,16 +3379,17 @@ mod tests {
         let markdown = render_comparison_markdown(&analysis);
 
         assert!(terminal.contains("byproduct=2.5000"));
-        assert!(terminal.contains("retained=0.250"));
+        assert!(terminal.contains("gross_retained=0.250"));
+        assert!(terminal.contains("excess_retained=0.200"));
         assert!(terminal.contains("leakage_heat=1.2500"));
         assert!(terminal.contains("without_events:"));
         assert!(terminal.contains("byproduct=n/a"));
         assert!(markdown.contains("## Stoichiometry V2 Comparison"));
         assert!(markdown.contains(
-            "| with_events | 100 | 3 | 7 | 2.500 | 0.625 | 0.250 | 1 | 0 | 11 | 1.250 |"
+            "| with_events | 100 | 3 | 7 | 2.500 | 0.625 | 0.250 | 0.500 | 0.200 | 1 | 0 | 11 | 1.250 |"
         ));
         assert!(markdown.contains(
-            "| without_events | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a |"
+            "| without_events | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a |"
         ));
     }
 
@@ -3294,6 +3406,245 @@ mod tests {
             deep_mean: total_concentration,
             per_z_mean: vec![total_concentration],
         }
+    }
+
+    fn minimal_analysis(
+        name: &str,
+        chemistry: Vec<SnapshotChemistry>,
+        stoich_v2: Option<StoichV2Analysis>,
+        byproduct_calibration: Option<ByproductCalibrationSummary>,
+    ) -> RunAnalysis {
+        RunAnalysis {
+            run_dir: PathBuf::from(format!("/tmp/{name}")),
+            grid: [1, 1, 1],
+            available_ticks: Vec::new(),
+            sampled_ticks: Vec::new(),
+            trajectory: None,
+            zonation: None,
+            cells: None,
+            cell_timeline: Vec::new(),
+            chemistry,
+            rulesets: None,
+            ruleset_timeline: Vec::new(),
+            transporter_pair_timeline: Vec::new(),
+            stoich_v2,
+            byproduct_calibration,
+            findings: Vec::new(),
+            warnings: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn comparison_baseline_adjusts_byproduct_field_pool() {
+        let baseline = minimal_analysis(
+            "baseline",
+            vec![SnapshotChemistry {
+                tick: 10,
+                nonfinite_values: 0,
+                negative_values: 0,
+                oxidant_penetration_z: None,
+                reductant_penetration_z: None,
+                redox_overlap_layers: 0,
+                species_profiles: vec![species_profile(4, 100.0)],
+            }],
+            Some(StoichV2Analysis {
+                summary_present: false,
+                events_present: true,
+                total_ticks: None,
+                enforcement: None,
+                gross_residual_abs_sum: None,
+                total_events: 1,
+                imbalanced_events: 0,
+                reaction_byproduct_events: 0,
+                reaction_byproduct_amount: 0.0,
+                reaction_byproduct_model_abs: 0.0,
+                reaction_byproduct_residual_abs: 0.0,
+                reaction_byproduct_by_species: Vec::new(),
+                reaction_leakage_events: 0,
+                reaction_leakage_amount: 0.0,
+                reaction_leakage_energy_to_heat: 0.0,
+            }),
+            None,
+        );
+        let byproduct = minimal_analysis(
+            "byproduct",
+            vec![SnapshotChemistry {
+                tick: 10,
+                nonfinite_values: 0,
+                negative_values: 0,
+                oxidant_penetration_z: None,
+                reductant_penetration_z: None,
+                redox_overlap_layers: 0,
+                species_profiles: vec![species_profile(4, 112.0)],
+            }],
+            Some(StoichV2Analysis {
+                summary_present: false,
+                events_present: true,
+                total_ticks: None,
+                enforcement: None,
+                gross_residual_abs_sum: None,
+                total_events: 1,
+                imbalanced_events: 0,
+                reaction_byproduct_events: 1,
+                reaction_byproduct_amount: 20.0,
+                reaction_byproduct_model_abs: 0.0,
+                reaction_byproduct_residual_abs: 0.0,
+                reaction_byproduct_by_species: vec![StoichSpeciesEventSummary {
+                    species_index: 4,
+                    amount: 20.0,
+                    events: 1,
+                }],
+                reaction_leakage_events: 0,
+                reaction_leakage_amount: 0.0,
+                reaction_leakage_energy_to_heat: 0.0,
+            }),
+            Some(ByproductCalibrationSummary {
+                total_byproduct_amount: 20.0,
+                final_byproduct_pool: Some(112.0),
+                retained_fraction: Some(5.6),
+                field_tick: Some(10),
+                ruleset_tick: None,
+                missing_field_species: 0,
+                cross_feeding_candidates: 0,
+                public_pool_candidates: 0,
+                species: vec![ByproductSpeciesCalibration {
+                    species_index: 4,
+                    name: "organic".to_string(),
+                    role: "carbon_source".to_string(),
+                    produced_amount: 20.0,
+                    final_field_total: Some(112.0),
+                    retained_fraction: Some(5.6),
+                    uptake_active_slots: 0,
+                    secretion_active_slots: 0,
+                    uptake_rate_sum: 0.0,
+                    secretion_rate_sum: 0.0,
+                    interpretation: "accumulating_pool".to_string(),
+                }],
+            }),
+        );
+        let analyses = vec![baseline, byproduct];
+        let mut runs = analyses
+            .iter()
+            .map(RunComparisonEntry::from_analysis)
+            .collect::<Vec<_>>();
+
+        let warnings = apply_byproduct_baseline_adjustment(&analyses, &mut runs);
+
+        assert!(warnings.is_empty());
+        assert_eq!(runs[0].byproduct_excess_final_pool, None);
+        assert_eq!(runs[1].byproduct_excess_final_pool, Some(12.0));
+        assert_eq!(runs[1].byproduct_excess_retained_fraction, Some(0.6));
+        let findings = classify_comparison_findings(&runs);
+        assert!(
+            !findings
+                .iter()
+                .any(|finding| finding.id == "comparison_byproduct_excess_pool_candidate")
+        );
+    }
+
+    #[test]
+    fn comparison_baseline_adjustment_requires_matching_field_tick() {
+        let baseline = minimal_analysis(
+            "baseline",
+            vec![SnapshotChemistry {
+                tick: 5,
+                nonfinite_values: 0,
+                negative_values: 0,
+                oxidant_penetration_z: None,
+                reductant_penetration_z: None,
+                redox_overlap_layers: 0,
+                species_profiles: vec![species_profile(4, 100.0)],
+            }],
+            Some(StoichV2Analysis {
+                summary_present: false,
+                events_present: true,
+                total_ticks: None,
+                enforcement: None,
+                gross_residual_abs_sum: None,
+                total_events: 1,
+                imbalanced_events: 0,
+                reaction_byproduct_events: 0,
+                reaction_byproduct_amount: 0.0,
+                reaction_byproduct_model_abs: 0.0,
+                reaction_byproduct_residual_abs: 0.0,
+                reaction_byproduct_by_species: Vec::new(),
+                reaction_leakage_events: 0,
+                reaction_leakage_amount: 0.0,
+                reaction_leakage_energy_to_heat: 0.0,
+            }),
+            None,
+        );
+        let byproduct = minimal_analysis(
+            "byproduct",
+            vec![SnapshotChemistry {
+                tick: 10,
+                nonfinite_values: 0,
+                negative_values: 0,
+                oxidant_penetration_z: None,
+                reductant_penetration_z: None,
+                redox_overlap_layers: 0,
+                species_profiles: vec![species_profile(4, 112.0)],
+            }],
+            Some(StoichV2Analysis {
+                summary_present: false,
+                events_present: true,
+                total_ticks: None,
+                enforcement: None,
+                gross_residual_abs_sum: None,
+                total_events: 1,
+                imbalanced_events: 0,
+                reaction_byproduct_events: 1,
+                reaction_byproduct_amount: 20.0,
+                reaction_byproduct_model_abs: 0.0,
+                reaction_byproduct_residual_abs: 0.0,
+                reaction_byproduct_by_species: vec![StoichSpeciesEventSummary {
+                    species_index: 4,
+                    amount: 20.0,
+                    events: 1,
+                }],
+                reaction_leakage_events: 0,
+                reaction_leakage_amount: 0.0,
+                reaction_leakage_energy_to_heat: 0.0,
+            }),
+            Some(ByproductCalibrationSummary {
+                total_byproduct_amount: 20.0,
+                final_byproduct_pool: Some(112.0),
+                retained_fraction: Some(5.6),
+                field_tick: Some(10),
+                ruleset_tick: None,
+                missing_field_species: 0,
+                cross_feeding_candidates: 0,
+                public_pool_candidates: 0,
+                species: vec![ByproductSpeciesCalibration {
+                    species_index: 4,
+                    name: "organic".to_string(),
+                    role: "carbon_source".to_string(),
+                    produced_amount: 20.0,
+                    final_field_total: Some(112.0),
+                    retained_fraction: Some(5.6),
+                    uptake_active_slots: 0,
+                    secretion_active_slots: 0,
+                    uptake_rate_sum: 0.0,
+                    secretion_rate_sum: 0.0,
+                    interpretation: "accumulating_pool".to_string(),
+                }],
+            }),
+        );
+        let analyses = vec![baseline, byproduct];
+        let mut runs = analyses
+            .iter()
+            .map(RunComparisonEntry::from_analysis)
+            .collect::<Vec<_>>();
+
+        let warnings = apply_byproduct_baseline_adjustment(&analyses, &mut runs);
+
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("field tick"))
+        );
+        assert_eq!(runs[1].byproduct_excess_final_pool, None);
+        assert_eq!(runs[1].byproduct_excess_retained_fraction, None);
     }
 
     #[test]

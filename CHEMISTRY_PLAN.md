@@ -125,8 +125,16 @@ model stable.
   in field snapshots, estimates retained byproduct pools, connects produced
   byproduct species to evolved transporter uptake pressure, and flags
   cross-feeding/public-pool candidates for sweep interpretation.
+- Pilot byproduct sweep: a 24x24x12, 160-tick ladder at strengths 0.0, 0.02,
+  0.08, and 0.25 showed similar population growth across settings and no
+  automated cross-feeding/public-pool candidates. Gross final organic pools were
+  misleading because background organic dominated the field; compare reports now
+  include zero-baseline-adjusted excess pools. In that pilot, excess retained
+  fractions were about 0.325, 0.534, and 0.385 for low/default/high byproduct
+  strengths, respectively, so the current default remains plausible but not
+  settled.
 
-The next implementation target is byproduct calibration experiments: run
-controlled sweeps with these proxies, quantify when routed byproducts create
-cross-feeding versus runaway public goods, then use those measurements to tune
-defaults or add richer explicit residual chemistry.
+The next implementation target is replicated byproduct calibration experiments:
+run longer controlled sweeps with zero-byproduct baselines, quantify when routed
+byproducts create cross-feeding versus runaway public goods, then use those
+measurements to tune defaults or add richer explicit residual chemistry.
