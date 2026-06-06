@@ -55,6 +55,7 @@ pub struct RunAnalysis {
     pub ruleset_timeline: Vec<RulesetSummary>,
     pub transporter_pair_timeline: Vec<TransportPairTimeline>,
     pub stoich_v2: Option<StoichV2Analysis>,
+    pub byproduct_calibration: Option<ByproductCalibrationSummary>,
     pub findings: Vec<Finding>,
     pub warnings: Vec<String>,
 }
@@ -87,6 +88,10 @@ pub struct RunComparisonEntry {
     pub reaction_byproduct_amount: Option<f64>,
     pub reaction_leakage_events: Option<u64>,
     pub reaction_leakage_energy_to_heat: Option<f64>,
+    pub byproduct_final_pool: Option<f64>,
+    pub byproduct_retained_fraction: Option<f64>,
+    pub byproduct_cross_feeding_candidates: Option<u64>,
+    pub byproduct_public_pool_candidates: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -214,8 +219,22 @@ pub struct TransporterSummary {
     pub avg_abs_gate_weight: f64,
     pub uptake_rate_sum: f64,
     pub secretion_rate_sum: f64,
+    pub external_species: Vec<TransportSpeciesSummary>,
     pub common_pairs: Vec<TransportPairSummary>,
     pub dominant_genotype: Option<GenotypeTransportSummary>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TransportSpeciesSummary {
+    pub ext_species: u8,
+    pub active_slots: u64,
+    pub uptake_active_slots: u64,
+    pub secretion_active_slots: u64,
+    pub uptake_dominant_slots: u64,
+    pub secretion_dominant_slots: u64,
+    pub gated_slots: u64,
+    pub uptake_rate_sum: f64,
+    pub secretion_rate_sum: f64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -280,6 +299,34 @@ pub struct StoichSpeciesEventSummary {
     pub species_index: i16,
     pub amount: f64,
     pub events: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ByproductCalibrationSummary {
+    pub total_byproduct_amount: f64,
+    pub final_byproduct_pool: Option<f64>,
+    pub retained_fraction: Option<f64>,
+    pub field_tick: Option<u64>,
+    pub ruleset_tick: Option<u64>,
+    pub missing_field_species: u64,
+    pub cross_feeding_candidates: u64,
+    pub public_pool_candidates: u64,
+    pub species: Vec<ByproductSpeciesCalibration>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ByproductSpeciesCalibration {
+    pub species_index: i16,
+    pub name: String,
+    pub role: String,
+    pub produced_amount: f64,
+    pub final_field_total: Option<f64>,
+    pub retained_fraction: Option<f64>,
+    pub uptake_active_slots: u64,
+    pub secretion_active_slots: u64,
+    pub uptake_rate_sum: f64,
+    pub secretion_rate_sum: f64,
+    pub interpretation: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -361,6 +408,18 @@ struct TransportPairAccumulator {
     gated_slots: u64,
 }
 
+#[derive(Debug, Clone, Default)]
+struct TransportSpeciesAccumulator {
+    active_slots: u64,
+    uptake_active_slots: u64,
+    secretion_active_slots: u64,
+    uptake_dominant_slots: u64,
+    secretion_dominant_slots: u64,
+    gated_slots: u64,
+    uptake_rate_sum: f64,
+    secretion_rate_sum: f64,
+}
+
 pub fn analyze_run(run_dir: impl AsRef<Path>, cfg: &AnalysisConfig) -> AnalysisResult<RunAnalysis> {
     let run_dir = run_dir.as_ref();
     let meta = load_run_meta(run_dir)?;
@@ -411,9 +470,14 @@ pub fn analyze_run(run_dir: impl AsRef<Path>, cfg: &AnalysisConfig) -> AnalysisR
         .or_else(|| available_ticks.last().copied());
     let cells = cell_timeline.last().cloned();
 
+    let full_rulesets_available = if cfg.include_rulesets && latest_tick.is_some() {
+        full_rulesets_enabled(run_dir)?
+    } else {
+        false
+    };
     let mut ruleset_timeline = Vec::new();
     if cfg.include_rulesets && latest_tick.is_some() {
-        if full_rulesets_enabled(run_dir)? {
+        if full_rulesets_available {
             for &tick in &sampled_ticks {
                 match summarize_rulesets(run_dir, tick, &meta) {
                     Ok(summary) => ruleset_timeline.push(summary),
@@ -438,6 +502,47 @@ pub fn analyze_run(run_dir: impl AsRef<Path>, cfg: &AnalysisConfig) -> AnalysisR
             None
         }
     };
+    let calibration_field = available_ticks.last().copied().and_then(|tick| {
+        if let Some(summary) = chemistry.iter().find(|summary| summary.tick == tick) {
+            Some(summary.clone())
+        } else {
+            match load_field_bytes(run_dir, tick, &meta)
+                .and_then(|bytes| summarize_field(tick, &meta, &bytes))
+            {
+                Ok(summary) => Some(summary),
+                Err(err) => {
+                    warnings.push(format!(
+                        "tick {tick}: byproduct calibration field analysis skipped: {err}"
+                    ));
+                    None
+                }
+            }
+        }
+    });
+    let calibration_rulesets = if cfg.include_rulesets && full_rulesets_available {
+        available_ticks.last().copied().and_then(|tick| {
+            if let Some(summary) = ruleset_timeline.iter().find(|summary| summary.tick == tick) {
+                Some(summary.clone())
+            } else {
+                match summarize_rulesets(run_dir, tick, &meta) {
+                    Ok(summary) => Some(summary),
+                    Err(err) => {
+                        warnings.push(format!(
+                            "tick {tick}: byproduct calibration ruleset analysis skipped: {err}"
+                        ));
+                        None
+                    }
+                }
+            }
+        })
+    } else {
+        None
+    };
+    let byproduct_calibration = summarize_byproduct_calibration(
+        stoich_v2.as_ref(),
+        calibration_field.as_ref(),
+        calibration_rulesets.as_ref(),
+    );
 
     let mut analysis = RunAnalysis {
         run_dir: run_dir.to_path_buf(),
@@ -453,6 +558,7 @@ pub fn analyze_run(run_dir: impl AsRef<Path>, cfg: &AnalysisConfig) -> AnalysisR
         ruleset_timeline,
         transporter_pair_timeline,
         stoich_v2,
+        byproduct_calibration,
         findings: Vec::new(),
         warnings,
     };
@@ -664,6 +770,46 @@ pub fn render_run_terminal(analysis: &RunAnalysis) -> String {
             ));
         }
     }
+    if let Some(calibration) = &analysis.byproduct_calibration {
+        out.push_str(&format!(
+            "  byproduct calibration: produced={:.4}, final_pool={}, retained={}, field_tick={:?}, ruleset_tick={:?}, missing_field_species={}, cross_feed_candidates={}, public_pool_candidates={}\n",
+            calibration.total_byproduct_amount,
+            calibration
+                .final_byproduct_pool
+                .map(|value| format!("{value:.4}"))
+                .unwrap_or_else(|| "n/a".to_string()),
+            calibration
+                .retained_fraction
+                .map(|value| format!("{value:.3}"))
+                .unwrap_or_else(|| "n/a".to_string()),
+            calibration.field_tick,
+            calibration.ruleset_tick,
+            calibration.missing_field_species,
+            calibration.cross_feeding_candidates,
+            calibration.public_pool_candidates
+        ));
+        let species = calibration
+            .species
+            .iter()
+            .take(4)
+            .map(|species| {
+                format!(
+                    "ext{} {}:{} prod={:.4} pool={} uptake_slots={}",
+                    species.species_index,
+                    species.name,
+                    species.interpretation,
+                    species.produced_amount,
+                    species
+                        .final_field_total
+                        .map(|value| format!("{value:.4}"))
+                        .unwrap_or_else(|| "n/a".to_string()),
+                    species.uptake_active_slots
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        out.push_str(&format!("  byproduct calibration species: {species}\n"));
+    }
     if analysis.ruleset_timeline.len() > 1 {
         out.push_str(&format!(
             "  ruleset timeline: {} sampled ticks, active transport {:.2}->{:.2}/cell, gated {:.2}->{:.2}/cell\n",
@@ -725,7 +871,7 @@ pub fn render_comparison_terminal(analysis: &ComparisonAnalysis) -> String {
     out.push_str("MARL run comparison\n");
     for run in &analysis.runs {
         out.push_str(&format!(
-            "  {}: final_pop={:?}, growth={:?}, top={:?}, dominant_genotype={:?}, active_transporters={:?}, byproduct={}, leakage_heat={}\n",
+            "  {}: final_pop={:?}, growth={:?}, top={:?}, dominant_genotype={:?}, active_transporters={:?}, byproduct={}, retained={}, leakage_heat={}\n",
             run.name,
             run.final_population,
             run.growth_factor.map(|v| format!("{v:.2}x")),
@@ -736,6 +882,9 @@ pub fn render_comparison_terminal(analysis: &ComparisonAnalysis) -> String {
                 .map(|v| format!("{v:.2}/cell")),
             run.reaction_byproduct_amount
                 .map(|value| format!("{value:.4}"))
+                .unwrap_or_else(|| "n/a".to_string()),
+            run.byproduct_retained_fraction
+                .map(|value| format!("{value:.3}"))
                 .unwrap_or_else(|| "n/a".to_string()),
             run.reaction_leakage_energy_to_heat
                 .map(|value| format!("{value:.4}"))
@@ -1030,6 +1179,54 @@ pub fn render_run_markdown(analysis: &RunAnalysis) -> String {
             );
         }
     }
+    if let Some(calibration) = &analysis.byproduct_calibration {
+        out.push_str("\n## Byproduct Calibration\n\n");
+        out.push_str(&format!(
+            "- Produced amount: {:.6}\n- Final byproduct pool: {}\n- Retained fraction: {}\n- Field tick: {}\n- Ruleset tick: {}\n- Missing field species: {}\n- Cross-feeding candidates: {}\n- Public-pool candidates: {}\n",
+            calibration.total_byproduct_amount,
+            calibration
+                .final_byproduct_pool
+                .map(|value| format!("{value:.6}"))
+                .unwrap_or_else(|| "n/a".to_string()),
+            calibration
+                .retained_fraction
+                .map(|value| format!("{value:.6}"))
+                .unwrap_or_else(|| "n/a".to_string()),
+            calibration
+                .field_tick
+                .map(|tick| tick.to_string())
+                .unwrap_or_else(|| "n/a".to_string()),
+            calibration
+                .ruleset_tick
+                .map(|tick| tick.to_string())
+                .unwrap_or_else(|| "n/a".to_string()),
+            calibration.missing_field_species,
+            calibration.cross_feeding_candidates,
+            calibration.public_pool_candidates
+        ));
+        out.push_str("\n| species | role | produced | final_pool | retained | uptake_slots | secretion_slots | interpretation |\n");
+        out.push_str("|---:|---|---:|---:|---:|---:|---:|---|\n");
+        for species in &calibration.species {
+            out.push_str(&format!(
+                "| {} {} | {} | {:.6} | {} | {} | {} | {} | {} |\n",
+                species.species_index,
+                species.name,
+                species.role,
+                species.produced_amount,
+                species
+                    .final_field_total
+                    .map(|value| format!("{value:.6}"))
+                    .unwrap_or_else(|| "n/a".to_string()),
+                species
+                    .retained_fraction
+                    .map(|value| format!("{value:.6}"))
+                    .unwrap_or_else(|| "n/a".to_string()),
+                species.uptake_active_slots,
+                species.secretion_active_slots,
+                species.interpretation
+            ));
+        }
+    }
     out.push_str("\n## Findings\n\n");
     if analysis.findings.is_empty() {
         out.push_str("- No major automated findings.\n");
@@ -1085,16 +1282,20 @@ pub fn render_comparison_markdown(analysis: &ComparisonAnalysis) -> String {
         .any(|run| run.stoich_total_events.is_some())
     {
         out.push_str("\n## Stoichiometry V2 Comparison\n\n");
-        out.push_str("| run | events | imbalanced | byproduct_events | byproduct_amount | leakage_events | leakage_heat |\n");
-        out.push_str("|---|---:|---:|---:|---:|---:|---:|\n");
+        out.push_str("| run | events | imbalanced | byproduct_events | byproduct_amount | final_byproduct_pool | retained_fraction | cross_feed_candidates | public_pool_candidates | leakage_events | leakage_heat |\n");
+        out.push_str("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n");
         for run in &analysis.runs {
             out.push_str(&format!(
-                "| {} | {} | {} | {} | {} | {} | {} |\n",
+                "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
                 run.name,
                 display_opt_u64(run.stoich_total_events),
                 display_opt_u64(run.stoich_imbalanced_events),
                 display_opt_u64(run.reaction_byproduct_events),
                 display_opt_f64(run.reaction_byproduct_amount),
+                display_opt_f64(run.byproduct_final_pool),
+                display_opt_f64(run.byproduct_retained_fraction),
+                display_opt_u64(run.byproduct_cross_feeding_candidates),
+                display_opt_u64(run.byproduct_public_pool_candidates),
                 display_opt_u64(run.reaction_leakage_events),
                 display_opt_f64(run.reaction_leakage_energy_to_heat)
             ));
@@ -1297,6 +1498,140 @@ fn parse_stoich_v2_events(text: &str) -> AnalysisResult<StoichV2EventAccumulator
         }
     }
     Ok(accumulator)
+}
+
+fn summarize_byproduct_calibration(
+    stoich: Option<&StoichV2Analysis>,
+    latest_chemistry: Option<&SnapshotChemistry>,
+    latest_rulesets: Option<&RulesetSummary>,
+) -> Option<ByproductCalibrationSummary> {
+    let stoich = stoich.filter(|stoich| stoich.events_present)?;
+    if stoich.reaction_byproduct_amount <= 0.0 || stoich.reaction_byproduct_by_species.is_empty() {
+        return None;
+    }
+
+    let mut species = Vec::new();
+    let mut final_pool_sum = 0.0;
+    let mut final_pool_seen = false;
+    let mut missing_field_species = 0;
+    let mut cross_feeding_candidates = 0;
+    let mut public_pool_candidates = 0;
+
+    for byproduct in &stoich.reaction_byproduct_by_species {
+        let species_index = byproduct.species_index;
+        let species_usize = usize::try_from(species_index).ok();
+        let profile = species_usize.and_then(|species| {
+            latest_chemistry.and_then(|chemistry| {
+                chemistry
+                    .species_profiles
+                    .iter()
+                    .find(|profile| profile.species == species)
+            })
+        });
+        let transport = species_usize.and_then(|species| {
+            latest_rulesets.and_then(|rulesets| {
+                rulesets
+                    .transporters
+                    .external_species
+                    .iter()
+                    .find(|summary| summary.ext_species as usize == species)
+            })
+        });
+        let descriptor = species_usize
+            .map(external_species_descriptor)
+            .unwrap_or_else(|| external_species_descriptor(usize::MAX));
+        let descriptor_profile: SpeciesDescriptorProfile = descriptor.into();
+        let final_field_total = profile.map(|profile| profile.total_concentration);
+        if let Some(total) = final_field_total {
+            final_pool_seen = true;
+            final_pool_sum += total;
+        } else {
+            missing_field_species += 1;
+        }
+        let retained_fraction = final_field_total.and_then(|total| {
+            (byproduct.amount > 0.0).then_some((total / byproduct.amount).max(0.0))
+        });
+        let uptake_active_slots = transport
+            .map(|summary| summary.uptake_active_slots)
+            .unwrap_or(0);
+        let secretion_active_slots = transport
+            .map(|summary| summary.secretion_active_slots)
+            .unwrap_or(0);
+        let interpretation = classify_byproduct_calibration(
+            retained_fraction,
+            transport
+                .map(|summary| summary.uptake_rate_sum)
+                .unwrap_or(0.0),
+            transport
+                .map(|summary| summary.secretion_rate_sum)
+                .unwrap_or(0.0),
+        );
+        if interpretation == "cross_feeding_candidate" {
+            cross_feeding_candidates += 1;
+        } else if interpretation == "public_pool_candidate" {
+            public_pool_candidates += 1;
+        }
+        species.push(ByproductSpeciesCalibration {
+            species_index,
+            name: descriptor.name.to_string(),
+            role: chemical_role_from_descriptor(&descriptor_profile).to_string(),
+            produced_amount: byproduct.amount,
+            final_field_total,
+            retained_fraction,
+            uptake_active_slots,
+            secretion_active_slots,
+            uptake_rate_sum: transport
+                .map(|summary| summary.uptake_rate_sum)
+                .unwrap_or(0.0),
+            secretion_rate_sum: transport
+                .map(|summary| summary.secretion_rate_sum)
+                .unwrap_or(0.0),
+            interpretation: interpretation.to_string(),
+        });
+    }
+
+    let complete_field_coverage = final_pool_seen && missing_field_species == 0;
+    let final_byproduct_pool = complete_field_coverage.then_some(final_pool_sum);
+    let retained_fraction = final_byproduct_pool.and_then(|pool| {
+        (stoich.reaction_byproduct_amount > 0.0).then_some(pool / stoich.reaction_byproduct_amount)
+    });
+
+    Some(ByproductCalibrationSummary {
+        total_byproduct_amount: stoich.reaction_byproduct_amount,
+        final_byproduct_pool,
+        retained_fraction,
+        field_tick: latest_chemistry.map(|chemistry| chemistry.tick),
+        ruleset_tick: latest_rulesets.map(|rulesets| rulesets.tick),
+        missing_field_species,
+        cross_feeding_candidates,
+        public_pool_candidates,
+        species,
+    })
+}
+
+fn classify_byproduct_calibration(
+    retained_fraction: Option<f64>,
+    uptake_rate_sum: f64,
+    secretion_rate_sum: f64,
+) -> &'static str {
+    let has_uptake_pressure = uptake_rate_sum > ACTIVE_TRANSPORT_THRESHOLD as f64;
+    if let Some(retained) = retained_fraction {
+        if uptake_rate_sum > secretion_rate_sum && retained < 0.5 {
+            "cross_feeding_candidate"
+        } else if retained >= 0.75 && !has_uptake_pressure {
+            "public_pool_candidate"
+        } else if retained >= 0.75 {
+            "accumulating_pool"
+        } else if has_uptake_pressure {
+            "uptake_pressure"
+        } else {
+            "low_retention"
+        }
+    } else if has_uptake_pressure {
+        "uptake_pressure_no_field_snapshot"
+    } else {
+        "production_only"
+    }
 }
 
 fn read_ticks_csv(run_dir: &Path) -> AnalysisResult<Vec<TickRow>> {
@@ -1516,7 +1851,7 @@ fn summarize_field(tick: u64, meta: &RunMeta, bytes: &[u8]) -> AnalysisResult<Sn
         .into());
     }
 
-    let tracked_species = [0usize, 1, 2, 3, 4];
+    let tracked_species = (0..s_ext).collect::<Vec<_>>();
     let mut sums = vec![vec![0.0; z]; tracked_species.len()];
     let mut totals = vec![0.0; tracked_species.len()];
     let mut max_values = vec![f64::NEG_INFINITY; tracked_species.len()];
@@ -1741,6 +2076,7 @@ fn summarize_transporters_from_rulesets(
     let mut uptake_rate_sum = 0.0f64;
     let mut secretion_rate_sum = 0.0f64;
     let mut pair_acc: HashMap<(u8, u8), TransportPairAccumulator> = HashMap::new();
+    let mut species_acc: HashMap<u8, TransportSpeciesAccumulator> = HashMap::new();
     let mut dominant_genotype = None;
 
     for dict_id in 0..unique_count {
@@ -1783,6 +2119,24 @@ fn summarize_transporters_from_rulesets(
                 gated_slots += count;
                 abs_gate_weight_sum += f64::from(tp.gate_weight.abs()) * count as f64;
             }
+            let species = species_acc.entry(tp.ext_species).or_default();
+            species.active_slots += count;
+            species.uptake_rate_sum += f64::from(uptake) * count as f64;
+            species.secretion_rate_sum += f64::from(secretion) * count as f64;
+            if uptake > ACTIVE_TRANSPORT_THRESHOLD {
+                species.uptake_active_slots += count;
+            }
+            if secretion > ACTIVE_TRANSPORT_THRESHOLD {
+                species.secretion_active_slots += count;
+            }
+            if uptake > secretion + ACTIVE_TRANSPORT_THRESHOLD {
+                species.uptake_dominant_slots += count;
+            } else if secretion > uptake + ACTIVE_TRANSPORT_THRESHOLD {
+                species.secretion_dominant_slots += count;
+            }
+            if tp.gate_weight.abs() > ACTIVE_TRANSPORT_THRESHOLD {
+                species.gated_slots += count;
+            }
             let pair = pair_acc
                 .entry((tp.ext_species, tp.int_species))
                 .or_default();
@@ -1822,6 +2176,26 @@ fn summarize_transporters_from_rulesets(
     });
     common_pairs.truncate(MAX_COMMON_TRANSPORT_PAIRS);
 
+    let mut external_species = species_acc
+        .into_iter()
+        .map(|(ext_species, acc)| TransportSpeciesSummary {
+            ext_species,
+            active_slots: acc.active_slots,
+            uptake_active_slots: acc.uptake_active_slots,
+            secretion_active_slots: acc.secretion_active_slots,
+            uptake_dominant_slots: acc.uptake_dominant_slots,
+            secretion_dominant_slots: acc.secretion_dominant_slots,
+            gated_slots: acc.gated_slots,
+            uptake_rate_sum: acc.uptake_rate_sum,
+            secretion_rate_sum: acc.secretion_rate_sum,
+        })
+        .collect::<Vec<_>>();
+    external_species.sort_by(|a, b| {
+        b.active_slots
+            .cmp(&a.active_slots)
+            .then_with(|| a.ext_species.cmp(&b.ext_species))
+    });
+
     let cell_count: u64 = cell_counts.values().map(|count| u64::from(*count)).sum();
     Ok(TransporterSummary {
         active_slots,
@@ -1837,6 +2211,7 @@ fn summarize_transporters_from_rulesets(
         },
         uptake_rate_sum,
         secretion_rate_sum,
+        external_species,
         common_pairs,
         dominant_genotype,
     })
@@ -2159,6 +2534,64 @@ fn classify_run_findings(analysis: &RunAnalysis) -> Vec<Finding> {
             ));
         }
     }
+    if let Some(calibration) = &analysis.byproduct_calibration {
+        if calibration.cross_feeding_candidates > 0 {
+            findings.push(finding(
+                "byproduct_cross_feeding_candidate",
+                FindingLevel::Interesting,
+                "Byproduct cross-feeding candidate",
+                format!(
+                    "{} byproduct species show uptake pressure with low final retention.",
+                    calibration.cross_feeding_candidates
+                ),
+                calibration
+                    .species
+                    .iter()
+                    .filter(|species| species.interpretation == "cross_feeding_candidate")
+                    .map(|species| {
+                        format!(
+                            "ext{} {} produced {:.3}, retained {}",
+                            species.species_index,
+                            species.name,
+                            species.produced_amount,
+                            species
+                                .retained_fraction
+                                .map(|value| format!("{value:.3}"))
+                                .unwrap_or_else(|| "n/a".to_string())
+                        )
+                    })
+                    .collect(),
+            ));
+        }
+        if calibration.public_pool_candidates > 0 {
+            findings.push(finding(
+                "byproduct_public_pool_candidate",
+                FindingLevel::Warning,
+                "Byproduct public-pool candidate",
+                format!(
+                    "{} byproduct species accumulated without detected uptake pressure.",
+                    calibration.public_pool_candidates
+                ),
+                calibration
+                    .species
+                    .iter()
+                    .filter(|species| species.interpretation == "public_pool_candidate")
+                    .map(|species| {
+                        format!(
+                            "ext{} {} produced {:.3}, retained {}",
+                            species.species_index,
+                            species.name,
+                            species.produced_amount,
+                            species
+                                .retained_fraction
+                                .map(|value| format!("{value:.3}"))
+                                .unwrap_or_else(|| "n/a".to_string())
+                        )
+                    })
+                    .collect(),
+            ));
+        }
+    }
     findings
 }
 
@@ -2187,6 +2620,48 @@ fn classify_comparison_findings(runs: &[RunComparisonEntry]) -> Vec<Finding> {
             Vec::new(),
         ));
     }
+    let cross_feeding = runs
+        .iter()
+        .filter_map(|run| {
+            run.byproduct_cross_feeding_candidates
+                .map(|count| (run, count))
+        })
+        .max_by_key(|(_, count)| *count);
+    if let Some((run, count)) = cross_feeding
+        && count > 0
+    {
+        findings.push(finding(
+            "comparison_byproduct_cross_feeding_candidate",
+            FindingLevel::Interesting,
+            "Byproduct cross-feeding candidate in comparison",
+            format!(
+                "{} had {} byproduct species with uptake pressure and low retention.",
+                run.name, count
+            ),
+            Vec::new(),
+        ));
+    }
+    let public_pool = runs
+        .iter()
+        .filter_map(|run| {
+            run.byproduct_public_pool_candidates
+                .map(|count| (run, count))
+        })
+        .max_by_key(|(_, count)| *count);
+    if let Some((run, count)) = public_pool
+        && count > 0
+    {
+        findings.push(finding(
+            "comparison_byproduct_public_pool_candidate",
+            FindingLevel::Warning,
+            "Byproduct public-pool candidate in comparison",
+            format!(
+                "{} had {} byproduct species accumulating without detected uptake pressure.",
+                run.name, count
+            ),
+            Vec::new(),
+        ));
+    }
     findings
 }
 
@@ -2196,6 +2671,7 @@ impl RunComparisonEntry {
             .stoich_v2
             .as_ref()
             .filter(|stoich| stoich.events_present);
+        let byproduct_calibration = analysis.byproduct_calibration.as_ref();
         Self {
             name: run_name(&analysis.run_dir),
             run_dir: analysis.run_dir.clone(),
@@ -2250,6 +2726,14 @@ impl RunComparisonEntry {
             reaction_leakage_events: event_stoich.map(|stoich| stoich.reaction_leakage_events),
             reaction_leakage_energy_to_heat: event_stoich
                 .map(|stoich| stoich.reaction_leakage_energy_to_heat),
+            byproduct_final_pool: byproduct_calibration
+                .and_then(|calibration| calibration.final_byproduct_pool),
+            byproduct_retained_fraction: byproduct_calibration
+                .and_then(|calibration| calibration.retained_fraction),
+            byproduct_cross_feeding_candidates: byproduct_calibration
+                .map(|calibration| calibration.cross_feeding_candidates),
+            byproduct_public_pool_candidates: byproduct_calibration
+                .map(|calibration| calibration.public_pool_candidates),
         }
     }
 }
@@ -2279,14 +2763,18 @@ fn fraction(part: u64, total: u64) -> f64 {
 }
 
 fn chemical_role(profile: &SpeciesProfile) -> &'static str {
-    let composition = &profile.descriptor.composition;
-    if profile.descriptor.work_coupling >= 0.75 && profile.descriptor.bond_energy >= 0.5 {
+    chemical_role_from_descriptor(&profile.descriptor)
+}
+
+fn chemical_role_from_descriptor(descriptor: &SpeciesDescriptorProfile) -> &'static str {
+    let composition = &descriptor.composition;
+    if descriptor.work_coupling >= 0.75 && descriptor.bond_energy >= 0.5 {
         "work_currency"
     } else if composition.signal_group >= 0.5 {
         "signal"
     } else if composition.structural_group >= 0.5 {
         "structural"
-    } else if profile.descriptor.storage_density >= 0.4 {
+    } else if descriptor.storage_density >= 0.4 {
         "storage"
     } else if composition.oxidizing_power >= 0.5 {
         "oxidant"
@@ -2394,6 +2882,7 @@ mod tests {
             .find(|profile| profile.species == 0)
             .unwrap();
         assert_eq!(summary.tick, 7);
+        assert_eq!(summary.species_profiles.len(), 5);
         assert_eq!(species0.per_z_mean, vec![0.0, 10.0]);
         assert_eq!(species0.total_concentration, 10.0);
         assert_eq!(species0.max_value, 10.0);
@@ -2403,6 +2892,28 @@ mod tests {
         assert_eq!(oxidant.per_z_mean, vec![1.0, 11.0]);
         assert_eq!(oxidant.descriptor.composition.oxidizing_power, 1.0);
         assert_eq!(chemical_role(oxidant), "oxidant");
+    }
+
+    #[test]
+    fn field_summary_tracks_all_external_species_for_byproduct_pools() {
+        let meta = RunMeta::new(1, 1, 1, 12, 0, true, false);
+        let floats = (0..12).map(|species| species as f32).collect::<Vec<_>>();
+        let bytes = floats
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect::<Vec<_>>();
+
+        let summary = summarize_field(3, &meta, &bytes).unwrap();
+
+        assert_eq!(summary.species_profiles.len(), 12);
+        let structural = summary
+            .species_profiles
+            .iter()
+            .find(|profile| profile.species == 7)
+            .unwrap();
+        assert_eq!(structural.name, "structural");
+        assert_eq!(structural.total_concentration, 7.0);
+        assert_eq!(chemical_role(structural), "structural");
     }
 
     #[test]
@@ -2582,6 +3093,12 @@ mod tests {
         assert_eq!(transporters.secretion_dominant_slots, 3);
         assert_eq!(transporters.bidirectional_slots, 2);
         assert_eq!(transporters.gated_slots, 3);
+        assert_eq!(transporters.external_species.len(), 2);
+        assert_eq!(transporters.external_species[0].ext_species, 1);
+        assert_eq!(transporters.external_species[0].active_slots, 3);
+        assert_eq!(transporters.external_species[0].uptake_active_slots, 3);
+        assert_eq!(transporters.external_species[0].secretion_active_slots, 2);
+        assert_eq!(transporters.external_species[0].uptake_dominant_slots, 1);
         assert!((transporters.avg_abs_gate_weight - 1.0 / 3.0).abs() < 1e-6);
         let dominant = transporters.dominant_genotype.as_ref().unwrap();
         assert_eq!(dominant.dict_id, 1);
@@ -2629,6 +3146,22 @@ mod tests {
                 avg_abs_gate_weight: 0.5,
                 uptake_rate_sum: 0.0,
                 secretion_rate_sum: 0.0,
+                external_species: common_pairs
+                    .iter()
+                    .map(|pair| TransportSpeciesSummary {
+                        ext_species: pair.ext_species,
+                        active_slots: pair.active_slots,
+                        uptake_active_slots: pair.active_slots,
+                        secretion_active_slots: (pair.avg_secrete_rate > 0.0)
+                            .then_some(pair.active_slots)
+                            .unwrap_or(0),
+                        uptake_dominant_slots: pair.active_slots,
+                        secretion_dominant_slots: 0,
+                        gated_slots: pair.gated_slots,
+                        uptake_rate_sum: pair.avg_uptake_rate * pair.active_slots as f64,
+                        secretion_rate_sum: pair.avg_secrete_rate * pair.active_slots as f64,
+                    })
+                    .collect(),
                 common_pairs,
                 dominant_genotype: None,
             },
@@ -2685,6 +3218,7 @@ mod tests {
             transporter_pair_timeline: summarize_transporter_pair_timeline(&ruleset_timeline),
             ruleset_timeline,
             stoich_v2: None,
+            byproduct_calibration: None,
             findings: Vec::new(),
             warnings: Vec::new(),
         };
@@ -2719,6 +3253,10 @@ mod tests {
             reaction_byproduct_amount: byproduct,
             reaction_leakage_events: byproduct.map(|_| 11),
             reaction_leakage_energy_to_heat: byproduct.map(|value| value / 2.0),
+            byproduct_final_pool: byproduct.map(|value| value / 4.0),
+            byproduct_retained_fraction: byproduct.map(|_| 0.25),
+            byproduct_cross_feeding_candidates: byproduct.map(|_| 1),
+            byproduct_public_pool_candidates: byproduct.map(|_| 0),
         };
         let analysis = ComparisonAnalysis {
             runs: vec![run("with_events", Some(2.5)), run("without_events", None)],
@@ -2730,12 +3268,203 @@ mod tests {
         let markdown = render_comparison_markdown(&analysis);
 
         assert!(terminal.contains("byproduct=2.5000"));
+        assert!(terminal.contains("retained=0.250"));
         assert!(terminal.contains("leakage_heat=1.2500"));
         assert!(terminal.contains("without_events:"));
         assert!(terminal.contains("byproduct=n/a"));
         assert!(markdown.contains("## Stoichiometry V2 Comparison"));
-        assert!(markdown.contains("| with_events | 100 | 3 | 7 | 2.500 | 11 | 1.250 |"));
-        assert!(markdown.contains("| without_events | n/a | n/a | n/a | n/a | n/a | n/a |"));
+        assert!(markdown.contains(
+            "| with_events | 100 | 3 | 7 | 2.500 | 0.625 | 0.250 | 1 | 0 | 11 | 1.250 |"
+        ));
+        assert!(markdown.contains(
+            "| without_events | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a |"
+        ));
+    }
+
+    fn species_profile(species: usize, total_concentration: f64) -> SpeciesProfile {
+        let descriptor = external_species_descriptor(species);
+        SpeciesProfile {
+            species,
+            name: descriptor.name.to_string(),
+            descriptor: descriptor.into(),
+            total_concentration,
+            max_value: total_concentration,
+            surface_mean: total_concentration,
+            middle_mean: total_concentration,
+            deep_mean: total_concentration,
+            per_z_mean: vec![total_concentration],
+        }
+    }
+
+    #[test]
+    fn byproduct_calibration_classifies_cross_feeding_and_public_pools() {
+        let stoich = StoichV2Analysis {
+            summary_present: false,
+            events_present: true,
+            total_ticks: None,
+            enforcement: None,
+            gross_residual_abs_sum: None,
+            total_events: 2,
+            imbalanced_events: 0,
+            reaction_byproduct_events: 2,
+            reaction_byproduct_amount: 11.0,
+            reaction_byproduct_model_abs: 0.0,
+            reaction_byproduct_residual_abs: 0.0,
+            reaction_byproduct_by_species: vec![
+                StoichSpeciesEventSummary {
+                    species_index: 4,
+                    amount: 10.0,
+                    events: 1,
+                },
+                StoichSpeciesEventSummary {
+                    species_index: 7,
+                    amount: 1.0,
+                    events: 1,
+                },
+            ],
+            reaction_leakage_events: 0,
+            reaction_leakage_amount: 0.0,
+            reaction_leakage_energy_to_heat: 0.0,
+        };
+        let chemistry = SnapshotChemistry {
+            tick: 20,
+            nonfinite_values: 0,
+            negative_values: 0,
+            oxidant_penetration_z: None,
+            reductant_penetration_z: None,
+            redox_overlap_layers: 0,
+            species_profiles: vec![species_profile(4, 2.0), species_profile(7, 1.0)],
+        };
+        let rulesets = rulesets_with_pairs(20, vec![pair(4, 4, 12)]);
+
+        let calibration =
+            summarize_byproduct_calibration(Some(&stoich), Some(&chemistry), Some(&rulesets))
+                .unwrap();
+
+        assert_eq!(calibration.cross_feeding_candidates, 1);
+        assert_eq!(calibration.public_pool_candidates, 1);
+        assert_eq!(calibration.field_tick, Some(20));
+        assert_eq!(calibration.ruleset_tick, Some(20));
+        assert_eq!(calibration.missing_field_species, 0);
+        assert!((calibration.final_byproduct_pool.unwrap() - 3.0).abs() < 1e-9);
+        assert!((calibration.retained_fraction.unwrap() - (3.0 / 11.0)).abs() < 1e-9);
+        let organic = calibration
+            .species
+            .iter()
+            .find(|species| species.species_index == 4)
+            .unwrap();
+        assert_eq!(organic.interpretation, "cross_feeding_candidate");
+        assert_eq!(organic.uptake_active_slots, 12);
+        let structural = calibration
+            .species
+            .iter()
+            .find(|species| species.species_index == 7)
+            .unwrap();
+        assert_eq!(structural.interpretation, "public_pool_candidate");
+
+        let analysis = RunAnalysis {
+            run_dir: PathBuf::from("/tmp/example_run"),
+            grid: [1, 1, 1],
+            available_ticks: Vec::new(),
+            sampled_ticks: Vec::new(),
+            trajectory: None,
+            zonation: None,
+            cells: None,
+            cell_timeline: Vec::new(),
+            chemistry: vec![chemistry],
+            rulesets: Some(rulesets),
+            ruleset_timeline: Vec::new(),
+            transporter_pair_timeline: Vec::new(),
+            stoich_v2: Some(stoich),
+            byproduct_calibration: Some(calibration),
+            findings: Vec::new(),
+            warnings: Vec::new(),
+        };
+        let findings = classify_run_findings(&analysis);
+        assert!(
+            findings
+                .iter()
+                .any(|finding| { finding.id == "byproduct_cross_feeding_candidate" })
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|finding| { finding.id == "byproduct_public_pool_candidate" })
+        );
+        let terminal = render_run_terminal(&analysis);
+        let markdown = render_run_markdown(&analysis);
+        assert!(terminal.contains("byproduct calibration: produced=11.0000"));
+        assert!(markdown.contains("## Byproduct Calibration"));
+        assert!(markdown.contains("cross_feeding_candidate"));
+        assert!(markdown.contains("public_pool_candidate"));
+    }
+
+    #[test]
+    fn byproduct_calibration_requires_complete_field_coverage_for_aggregate_retention() {
+        let stoich = StoichV2Analysis {
+            summary_present: false,
+            events_present: true,
+            total_ticks: None,
+            enforcement: None,
+            gross_residual_abs_sum: None,
+            total_events: 2,
+            imbalanced_events: 0,
+            reaction_byproduct_events: 2,
+            reaction_byproduct_amount: 2.0,
+            reaction_byproduct_model_abs: 0.0,
+            reaction_byproduct_residual_abs: 0.0,
+            reaction_byproduct_by_species: vec![
+                StoichSpeciesEventSummary {
+                    species_index: 4,
+                    amount: 1.0,
+                    events: 1,
+                },
+                StoichSpeciesEventSummary {
+                    species_index: 7,
+                    amount: 1.0,
+                    events: 1,
+                },
+            ],
+            reaction_leakage_events: 0,
+            reaction_leakage_amount: 0.0,
+            reaction_leakage_energy_to_heat: 0.0,
+        };
+        let chemistry = SnapshotChemistry {
+            tick: 9,
+            nonfinite_values: 0,
+            negative_values: 0,
+            oxidant_penetration_z: None,
+            reductant_penetration_z: None,
+            redox_overlap_layers: 0,
+            species_profiles: vec![species_profile(4, 0.25)],
+        };
+
+        let calibration = summarize_byproduct_calibration(Some(&stoich), Some(&chemistry), None)
+            .expect("byproduct production should produce calibration summary");
+
+        assert_eq!(calibration.field_tick, Some(9));
+        assert_eq!(calibration.ruleset_tick, None);
+        assert_eq!(calibration.missing_field_species, 1);
+        assert_eq!(calibration.final_byproduct_pool, None);
+        assert_eq!(calibration.retained_fraction, None);
+        assert_eq!(
+            calibration
+                .species
+                .iter()
+                .find(|species| species.species_index == 4)
+                .unwrap()
+                .final_field_total,
+            Some(0.25)
+        );
+        assert_eq!(
+            calibration
+                .species
+                .iter()
+                .find(|species| species.species_index == 7)
+                .unwrap()
+                .final_field_total,
+            None
+        );
     }
 
     #[test]
@@ -2784,6 +3513,7 @@ mod tests {
                 reaction_leakage_amount: summary.leakage.amount,
                 reaction_leakage_energy_to_heat: summary.leakage.reservoir_energy,
             }),
+            byproduct_calibration: None,
             findings: Vec::new(),
             warnings: Vec::new(),
         };
@@ -2840,6 +3570,7 @@ mod tests {
             ruleset_timeline: Vec::new(),
             transporter_pair_timeline: Vec::new(),
             stoich_v2: Some(summary),
+            byproduct_calibration: None,
             findings: Vec::new(),
             warnings: Vec::new(),
         };
@@ -2897,6 +3628,7 @@ mod tests {
             ruleset_timeline: Vec::new(),
             transporter_pair_timeline: Vec::new(),
             stoich_v2: None,
+            byproduct_calibration: None,
             findings: Vec::new(),
             warnings: Vec::new(),
         };

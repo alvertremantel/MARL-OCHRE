@@ -121,7 +121,12 @@ model stable.
   and heat-leakage totals across runs, and TOML parsing/validation rejects
   unknown keys and invalid values so typoed calibration settings fail before a
   run starts.
+- Byproduct calibration proxies: `marl-analyze` now tracks all external species
+  in field snapshots, estimates retained byproduct pools, connects produced
+  byproduct species to evolved transporter uptake pressure, and flags
+  cross-feeding/public-pool candidates for sweep interpretation.
 
-The next implementation target is byproduct calibration: quantify when these
-routed byproducts create cross-feeding versus runaway public goods, then use
-those measurements to tune defaults or add richer explicit residual chemistry.
+The next implementation target is byproduct calibration experiments: run
+controlled sweeps with these proxies, quantify when routed byproducts create
+cross-feeding versus runaway public goods, then use those measurements to tune
+defaults or add richer explicit residual chemistry.

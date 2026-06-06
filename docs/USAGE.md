@@ -359,7 +359,14 @@ cargo run -p marl-analyze -- compare output/run_a output/run_b --out-dir output/
 
 When compared runs include v2 event rows, the comparison report includes
 reaction-byproduct and reaction-leakage totals so chemistry calibration sweeps
-can be inspected headlessly.
+can be inspected headlessly. It also reports byproduct calibration proxies:
+final byproduct pool, retained fraction, cross-feeding candidates, and
+public-pool candidates. A cross-feeding candidate means a produced byproduct
+species has evolved uptake pressure and low final retention; a public-pool
+candidate means it accumulated without detected uptake pressure.
+The byproduct calibration section reports the field and ruleset ticks used for
+those proxies. Aggregate retained fraction is omitted when any produced
+byproduct species is missing from the field snapshot coverage.
 
 By default, analysis reads the full `ticks.csv` trajectory and samples the
 first, middle, and latest binary snapshots. Use `--all-snapshots`,
@@ -391,7 +398,7 @@ surface HGT counts in its terminal or Markdown summaries.
 - `stoich_ticks.csv` columns: `reaction_count`, `active_flux`, `imbalanced_reaction_count`, `unknown_species_flux`, `carbon_to_energy_flux`, `reductant_to_energy_flux`, `gross_material_abs`, `gross_total_abs`, then net signed `delta_*` budget columns.
 - `stoich_summary.json` reports the same run-level ledger, with `material_abs_sum` as the gross material imbalance magnitude, `gross_total_abs_sum` as the gross material plus redox plus energy magnitude, and `net_material_abs_sum` as the final signed material imbalance after cancellation.
 - v1 files cover legacy intracellular reactions. `stoich_v2_summary.json` and `stoich_v2_events.csv` cover boundary inputs, diffusion/decay, light availability, transport, spatial exchange, intracellular reactions, maintenance, effectors, division, and death.
-- `marl-analyze` summarizes `reaction_byproduct` totals by external species and `reaction_leakage` energy sent to heat when v2 event rows are available.
+- `marl-analyze` summarizes `reaction_byproduct` totals by external species, final retained byproduct pools from binary field snapshots, transporter uptake pressure from full ruleset sidecars, and `reaction_leakage` energy sent to heat when v2 event rows are available.
 - `stoich_enforcement = "audit"` records the v2 ledger without changing dynamics. `stoich_enforcement = "strict"` keeps the feature opt-in, rejects unbalanced transport/effectors and untemplated active reactions, and closes modeled sources/sinks through explicit reservoirs.
 - Strict mode also constrains structural reaction mutations to the balanced template catalog, so strict evolutionary proposal distributions are intentionally different from legacy runs.
 
