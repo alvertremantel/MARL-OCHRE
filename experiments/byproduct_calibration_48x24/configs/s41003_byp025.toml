@@ -1,0 +1,32 @@
+[grid]
+x = 48
+y = 48
+z = 24
+
+[simulation]
+rng_seed = 41003
+reaction_byproduct_strength = 0.25
+reaction_byproduct_max_fraction = 0.25
+reaction_leakage_strength = 0.15
+reaction_leakage_max_fraction = 0.5
+stoich_enforcement = "audit"
+seed_margin = 4
+diffusion_substeps = 2
+boundary_prime_layers = 1
+
+[output]
+max_ticks = 801
+stats_interval = 200
+snapshot_interval = 400
+ruleset_interval = 400
+ruleset_output_mode = "full"
+seed_count = 20
+output_dir = "output/byprod_calib_48x24/s41003_byp025"
+write_tick_log = true
+write_binary_field = true
+write_binary_cells = true
+write_stoich_v2_summary = true
+write_stoich_v2_events = false
+image_interval = 0
+write_ancestry_map = false
+write_density_map = false

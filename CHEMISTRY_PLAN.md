@@ -163,6 +163,12 @@ model stable.
   without full row-level event logs. A summary-only 16x16x8, 81-tick smoke run
   confirmed byproduct/leakage analysis and calibration species reporting with no
   event CSV.
+- Replicated sweep package: `experiments/byproduct_calibration_48x24/` now
+  contains the explicit 4-seed x 4-strength TOML matrix and run/analyze
+  commands for the larger compact-summary byproduct calibration sweep. A
+  48x48x24 checked-config smoke confirmed the configs parse, use the recorded
+  seed, produce compact v2 summaries without event CSV, and remain analyzable by
+  `marl-analyze`.
 
 The next implementation target is the larger replicated byproduct sweep using
 compact v2 summaries by default: run four paired seeds across zero, low,
