@@ -65,7 +65,7 @@ This repository is a functional prototype, not a polished platform. The core sim
 
 ## Status Summary
 
-The project is already a real simulation rather than a scaffold. Its current strengths are the field/cell split, the spatial exclusion model, the seeded ecological gradient, the 3D viewer, and the data products. Its main unfinished areas are adaptive receptor wiring, re-enabled HGT, and broader chemistry expansion.
+The project is already a real simulation rather than a scaffold. Its current strengths are the field/cell split, the spatial exclusion model, the seeded ecological gradient, optional local HGT, the 3D viewer, and the data products. Its main unfinished areas are adaptive receptor wiring, HGT calibration, and broader chemistry expansion.
 
 ## Documentation
 

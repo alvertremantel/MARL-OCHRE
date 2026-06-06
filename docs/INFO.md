@@ -261,7 +261,7 @@ The project is in a good prototype state. It is not a toy, but it is also not ye
 ### Present But Not Fully Integrated
 
 - receptor activations are computed but not used
-- HGT transfer logic exists but is not called
+- optional HGT is wired into the tick loop, but disabled by default and still experimental
 - signaling species exist in the chemistry space but are not meaningfully used by starters
 - structural deposit species affects diffusion, but current starter metabolisms do not actively build a structural niche
 
@@ -304,4 +304,4 @@ That order follows the dependency chain from assumptions, to field physics, to c
 
 ## Bottom Line
 
-The codebase today is best described as a coherent CPU research prototype for spatial microbial evolution. Its strongest ideas are already in place: spatial exclusion, chemically mediated interaction, depth-structured ecology, lineage-producing division, and decent analysis outputs. Its most obvious unfinished step is moving from passive chemistry-following cells to cells whose sensing machinery actually modulates behavior, with HGT as a secondary unfinished branch.
+The codebase today is best described as a coherent CPU research prototype for spatial microbial evolution. Its strongest ideas are already in place: spatial exclusion, chemically mediated interaction, depth-structured ecology, lineage-producing division, optional local HGT, and decent analysis outputs. Its most obvious unfinished step is moving from passive chemistry-following cells to cells whose sensing machinery actually modulates behavior, with HGT remaining an experimental branch rather than a calibrated biological model.
