@@ -165,6 +165,8 @@ Core physics and biology parameters:
 | `reaction_descriptor_max_factor` | f32 | 1.5 | Maximum descriptor multiplier for reaction rates |
 | `reaction_leakage_strength` | f32 | 0.15 | Heat leakage from poorly coupled non-strict reactions |
 | `reaction_leakage_max_fraction` | f32 | 0.5 | Maximum leakage fraction of an accepted non-strict reaction flux |
+| `reaction_byproduct_strength` | f32 | 0.08 | Product diversion into extracellular byproducts for poorly coupled non-strict reactions |
+| `reaction_byproduct_max_fraction` | f32 | 0.25 | Maximum fraction of accepted non-strict reaction flux diverted into byproducts |
 | `base_division_prep` | f32 | 20.0 | Tick count for full division prep |
 | `prep_maintenance_multiplier` | f32 | 2.0 | Maintenance multiplier during division prep |
 | `rush_penalty_rate` | f32 | 0.05 | Penalty for evolving shorter division prep |

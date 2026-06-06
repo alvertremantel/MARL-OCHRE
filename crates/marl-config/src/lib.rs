@@ -543,6 +543,8 @@ pub struct SimulationConfig {
     pub reaction_descriptor_max_factor: f32,
     pub reaction_leakage_strength: f32,
     pub reaction_leakage_max_fraction: f32,
+    pub reaction_byproduct_strength: f32,
+    pub reaction_byproduct_max_fraction: f32,
 
     // Cell cycle
     pub base_division_prep: f32,
@@ -628,6 +630,8 @@ impl Default for SimulationConfig {
             reaction_descriptor_max_factor: 1.5,
             reaction_leakage_strength: 0.15,
             reaction_leakage_max_fraction: 0.5,
+            reaction_byproduct_strength: 0.08,
+            reaction_byproduct_max_fraction: 0.25,
 
             base_division_prep: 20.0,
             prep_maintenance_multiplier: 2.0,
@@ -822,6 +826,59 @@ impl SimulationConfig {
         }
     }
 
+    pub fn reaction_descriptor_byproduct_fraction(
+        &self,
+        substrate: usize,
+        product: usize,
+        cofactor: u8,
+    ) -> f32 {
+        let strength = self.reaction_byproduct_strength.max(0.0);
+        if strength <= f32::EPSILON {
+            return 0.0;
+        }
+        let factor = self.reaction_descriptor_factor(substrate, product, cofactor);
+        let fraction = strength * (1.0 - factor).max(0.0);
+        if fraction.is_finite() {
+            fraction.clamp(0.0, self.reaction_byproduct_max_fraction.max(0.0))
+        } else {
+            0.0
+        }
+    }
+
+    pub fn reaction_descriptor_byproduct_species(
+        &self,
+        substrate: usize,
+        product: usize,
+        cofactor: u8,
+    ) -> usize {
+        let substrate = internal_species_descriptor(substrate);
+        let product = internal_species_descriptor(product);
+        let cofactor = (cofactor != stoich::NO_COFACTOR)
+            .then(|| internal_species_descriptor(cofactor as usize));
+
+        let signal_load = substrate.composition.signal_group
+            + product.composition.signal_group
+            + cofactor
+                .map(|descriptor| descriptor.composition.signal_group)
+                .unwrap_or(0.0);
+        if signal_load >= 0.5 {
+            return if product.composition.signal_group >= substrate.composition.signal_group {
+                EXT_SIGNAL_A
+            } else {
+                EXT_SIGNAL_B
+            };
+        }
+
+        let structural_load = substrate.composition.structural_group
+            + product.composition.structural_group
+            + product.storage_density;
+        if structural_load >= 0.7 {
+            return EXT_STRUCTURAL;
+        }
+
+        EXT_ORGANIC
+    }
+
     pub fn validate_chemistry(&self) -> Result<(), String> {
         for (name, value) in [
             (
@@ -853,6 +910,14 @@ impl SimulationConfig {
                 "reaction_leakage_max_fraction",
                 self.reaction_leakage_max_fraction,
             ),
+            (
+                "reaction_byproduct_strength",
+                self.reaction_byproduct_strength,
+            ),
+            (
+                "reaction_byproduct_max_fraction",
+                self.reaction_byproduct_max_fraction,
+            ),
         ] {
             if !value.is_finite() || value < 0.0 {
                 return Err(format!(
@@ -870,6 +935,12 @@ impl SimulationConfig {
             return Err(format!(
                 "reaction_leakage_max_fraction ({}) must be <= 1.0",
                 self.reaction_leakage_max_fraction
+            ));
+        }
+        if self.reaction_byproduct_max_fraction > 1.0 {
+            return Err(format!(
+                "reaction_byproduct_max_fraction ({}) must be <= 1.0",
+                self.reaction_byproduct_max_fraction
             ));
         }
         for source in self.effective_boundary_sources() {
@@ -1193,6 +1264,18 @@ mod tests {
         assert!(
             poor_coupling.reaction_descriptor_leak_fraction(EXT_CARBON, EXT_ENERGY, 0xFF) > 0.0
         );
+        assert!(
+            poor_coupling.reaction_descriptor_byproduct_fraction(EXT_CARBON, EXT_ENERGY, 0xFF)
+                > 0.0
+        );
+        assert_eq!(
+            poor_coupling.reaction_descriptor_byproduct_species(EXT_CARBON, EXT_ENERGY, 0xFF),
+            EXT_ORGANIC
+        );
+        assert_eq!(
+            poor_coupling.reaction_descriptor_byproduct_species(EXT_CARBON, 7, 0xFF),
+            EXT_STRUCTURAL
+        );
     }
 
     #[test]
@@ -1394,6 +1477,18 @@ mod tests {
 
         let sim = SimulationConfig {
             reaction_leakage_max_fraction: 1.1,
+            ..Default::default()
+        };
+        assert!(sim.validate_chemistry().is_err());
+
+        let sim = SimulationConfig {
+            reaction_byproduct_strength: f32::NAN,
+            ..Default::default()
+        };
+        assert!(sim.validate_chemistry().is_err());
+
+        let sim = SimulationConfig {
+            reaction_byproduct_max_fraction: 1.1,
             ..Default::default()
         };
         assert!(sim.validate_chemistry().is_err());

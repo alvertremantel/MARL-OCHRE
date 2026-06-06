@@ -626,6 +626,34 @@ impl CellState {
                 }
             }
             if !sim.stoich_enforcement.is_strict() {
+                let byproduct_species =
+                    sim.reaction_descriptor_byproduct_species(sub_idx, prod_idx, rxn.cofactor);
+                let requested_byproduct = flux
+                    * sim.reaction_descriptor_byproduct_fraction(sub_idx, prod_idx, rxn.cofactor);
+                let byproduct_delta = transfer_delta(byproduct_species, prod_idx, -1.0);
+                let byproduct = if byproduct_delta.is_near_zero(1e-4) {
+                    requested_byproduct.min(self.internal[prod_idx].max(0.0))
+                } else {
+                    0.0
+                };
+                if byproduct > 0.0 {
+                    self.internal[prod_idx] = (self.internal[prod_idx] - byproduct).max(0.0);
+                    field_deltas[byproduct_species] += byproduct;
+                    if record_full_stoich && let Some(ledger) = stoich.as_deref_mut() {
+                        ledger.record(
+                            StoichRecord::new(
+                                StoichStage::Reactions,
+                                StoichEventKind::ReactionByproduct,
+                                byproduct,
+                            )
+                            .model_delta(transfer_delta(byproduct_species, prod_idx, -byproduct))
+                            .actor(self.lineage_id)
+                            .species(byproduct_species),
+                            keep_stoich_events,
+                        );
+                    }
+                }
+
                 let requested_leakage =
                     flux * sim.reaction_descriptor_leak_fraction(sub_idx, prod_idx, rxn.cofactor);
                 let leakage = requested_leakage.min(self.internal[0].max(0.0));
@@ -1519,8 +1547,12 @@ mod tests {
         let mut cell = test_cell(ruleset);
         cell.internal[1] = 10.0;
         cell.internal[2] = 0.1;
+        let sim = SimulationConfig {
+            reaction_byproduct_strength: 0.0,
+            ..SimulationConfig::default()
+        };
 
-        cell.tick(&[0.0; S_EXT], 0.0, &SimulationConfig::default());
+        cell.tick(&[0.0; S_EXT], 0.0, &sim);
 
         assert!((cell.internal[2] - 0.0).abs() < 1e-6);
         assert!((cell.internal[3] - 0.1).abs() < 1e-6);
@@ -1541,8 +1573,12 @@ mod tests {
         };
         let mut cell = test_cell(ruleset);
         cell.internal[2] = 0.15;
+        let sim = SimulationConfig {
+            reaction_byproduct_strength: 0.0,
+            ..SimulationConfig::default()
+        };
 
-        cell.tick(&[0.0; S_EXT], 0.0, &SimulationConfig::default());
+        cell.tick(&[0.0; S_EXT], 0.0, &sim);
 
         assert!(cell.internal[2].abs() < 1e-6);
         assert!((cell.internal[3] - 0.1).abs() < 1e-6);
@@ -1634,6 +1670,92 @@ mod tests {
     }
 
     #[test]
+    fn descriptor_reaction_byproduct_diverts_product_to_field() {
+        let mut ruleset = test_ruleset();
+        ruleset.reactions[0] = Reaction {
+            substrate: EXT_ENERGY as u8,
+            product: EXT_ORGANIC as u8,
+            catalyst: LIGHT_SPECIES as u8,
+            cofactor: 0xFF,
+            k_m: 1.0,
+            v_max: 0.05,
+            k_cat: 1.0,
+        };
+        let sim = SimulationConfig {
+            lambda_maintenance: 0.0,
+            reaction_maintenance: 0.0,
+            reaction_descriptor_coupling_strength: 1.0,
+            reaction_byproduct_strength: 1.0,
+            reaction_byproduct_max_fraction: 1.0,
+            reaction_leakage_strength: 0.0,
+            ..SimulationConfig::default()
+        };
+        let mut cell = test_cell(ruleset);
+        let mut ledger = StoichTickLedger::default();
+
+        let (deltas, _) =
+            cell.tick_with_stoich(&[0.0; S_EXT], 1.0, &sim, Some(&mut ledger), true, true);
+
+        let flux = 10.0 - cell.internal[EXT_ENERGY];
+        let byproduct_species =
+            sim.reaction_descriptor_byproduct_species(EXT_ENERGY, EXT_ORGANIC, 0xFF);
+        let expected_byproduct =
+            flux * sim.reaction_descriptor_byproduct_fraction(EXT_ENERGY, EXT_ORGANIC, 0xFF);
+        let event = ledger
+            .events
+            .iter()
+            .find(|event| event.kind == StoichEventKind::ReactionByproduct)
+            .expect("reaction byproduct event should be recorded");
+        assert_eq!(byproduct_species, EXT_ORGANIC);
+        assert!((deltas[EXT_ORGANIC] - expected_byproduct).abs() < 1e-6);
+        assert!((cell.internal[EXT_ORGANIC] - (flux - expected_byproduct)).abs() < 1e-6);
+        assert!((event.amount - expected_byproduct).abs() < 1e-6);
+        assert_eq!(event.species_index, EXT_ORGANIC as i16);
+        assert!(event.model_delta.is_near_zero(1e-6));
+    }
+
+    #[test]
+    fn descriptor_reaction_byproduct_skips_incompatible_material_route() {
+        let mut ruleset = test_ruleset();
+        ruleset.reactions[0] = Reaction {
+            substrate: EXT_CARBON as u8,
+            product: 8,
+            catalyst: LIGHT_SPECIES as u8,
+            cofactor: 0xFF,
+            k_m: 1.0,
+            v_max: 0.05,
+            k_cat: 1.0,
+        };
+        let sim = SimulationConfig {
+            lambda_maintenance: 0.0,
+            reaction_maintenance: 0.0,
+            reaction_descriptor_coupling_strength: 1.0,
+            reaction_byproduct_strength: 1.0,
+            reaction_byproduct_max_fraction: 1.0,
+            reaction_leakage_strength: 0.0,
+            ..SimulationConfig::default()
+        };
+        let mut cell = test_cell(ruleset);
+        cell.internal[EXT_CARBON] = 10.0;
+        let mut ledger = StoichTickLedger::default();
+
+        let (deltas, _) =
+            cell.tick_with_stoich(&[0.0; S_EXT], 1.0, &sim, Some(&mut ledger), true, true);
+
+        assert_eq!(
+            sim.reaction_descriptor_byproduct_species(EXT_CARBON, 8, 0xFF),
+            EXT_ORGANIC
+        );
+        assert!(deltas.iter().all(|delta| delta.abs() < 1e-6));
+        assert!(
+            ledger
+                .events
+                .iter()
+                .all(|event| event.kind != StoichEventKind::ReactionByproduct)
+        );
+    }
+
+    #[test]
     fn strict_descriptor_reactions_do_not_leak_heat() {
         let mut ruleset = test_ruleset();
         ruleset.reactions[0] = Reaction {
@@ -1658,7 +1780,8 @@ mod tests {
         cell.internal[3] = 10.0;
         let mut ledger = StoichTickLedger::default();
 
-        cell.tick_with_stoich(&[0.0; S_EXT], 1.0, &sim, Some(&mut ledger), true, true);
+        let (deltas, _) =
+            cell.tick_with_stoich(&[0.0; S_EXT], 1.0, &sim, Some(&mut ledger), true, true);
 
         assert!(
             ledger
@@ -1672,6 +1795,13 @@ mod tests {
                 .iter()
                 .all(|event| event.kind != StoichEventKind::ReactionLeakage)
         );
+        assert!(
+            ledger
+                .events
+                .iter()
+                .all(|event| event.kind != StoichEventKind::ReactionByproduct)
+        );
+        assert_eq!(deltas[EXT_ORGANIC], 0.0);
         assert!(ledger.reservoir_deltas[StoichReservoir::HeatSink.index()].total_abs_sum() < 1e-6);
     }
 

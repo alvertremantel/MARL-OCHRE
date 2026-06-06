@@ -46,6 +46,8 @@ reaction_descriptor_min_factor = 0.25
 reaction_descriptor_max_factor = 1.5
 reaction_leakage_strength = 0.15
 reaction_leakage_max_fraction = 0.5
+reaction_byproduct_strength = 0.08
+reaction_byproduct_max_fraction = 0.25
 
 base_division_prep = 20.0
 prep_maintenance_multiplier = 2.0

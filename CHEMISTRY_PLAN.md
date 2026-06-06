@@ -108,9 +108,13 @@ model stable.
   descriptor-aware.
 - Reaction heat leakage: poorly coupled non-strict reactions now leak internal
   energy to heat according to descriptor mismatch. This makes bad chemistry
-  costly without banning it, while keeping material byproduct networks for a
-  later slice.
+  costly without banning it, alongside the material byproduct routing below.
+- Reaction byproducts: poorly coupled non-strict reactions now divert a bounded
+  fraction of accepted product flux into extracellular byproducts. Routing is
+  descriptor-based at a coarse level: signal-like chemistry goes to signal
+  pools, structural/storage-heavy chemistry goes to structural material, and
+  most carbon/lipid/toxin-bearing failures become organic waste.
 
-The next implementation target is material byproducts: descriptor compatibility
-should determine when failed or inefficient reactions produce waste,
-intermediates, or secreted cross-feeding products rather than only heat.
+The next implementation target is byproduct calibration and analysis: quantify
+when these routed byproducts create cross-feeding versus runaway public goods,
+then expose reaction-byproduct summaries in the CLI analysis reports.
