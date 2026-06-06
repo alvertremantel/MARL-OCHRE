@@ -37,13 +37,16 @@ A detailed architecture walkthrough lives in [`docs/INFO.md`](docs/INFO.md).
 - Occupied voxels are excluded from diffusion, so dense clusters starve internally.
 - Cells sample only empty face-neighbor voxels, not their own occupied voxel.
 - Division splits all internal species 50/50 to avoid division as a free-energy exploit.
+- Optional horizontal gene transfer copies complete active reaction rules between local neighbors,
+  gated by runtime config and evolved `hgt_propensity`.
 - Light is used as a catalyst signal inside cells, not as a free energy source.
 - Selection is thermodynamic and spatial, driven by local chemistry and access constraints.
 
 ## Known In-Progress Or Partial Areas
 
 - Receptors are computed each tick but are not yet used to gate transport or reactions.
-- Horizontal gene transfer (`hgt.rs`) is implemented, but HGT is currently disabled in the main loop.
+- Horizontal gene transfer is behaviorally wired but disabled by default; it remains intentionally
+  stochastic and limited to reaction-rule chunks.
 - The code includes spare external and internal species capacity for future chemistry expansion.
 - GPU diffusion exists as an optional prototype behind the engine crate's `gpu` feature.
 
@@ -62,7 +65,7 @@ This repository is a functional prototype, not a polished platform. The core sim
 
 ## Status Summary
 
-The project is already a real simulation rather than a scaffold. Its current strengths are the field/cell split, the spatial exclusion model, the seeded ecological gradient, the 3D viewer, and the data products. Its main unfinished areas are adaptive receptor wiring, re-enabled HGT, and broader chemistry expansion.
+The project is already a real simulation rather than a scaffold. Its current strengths are the field/cell split, the spatial exclusion model, the seeded ecological gradient, optional local HGT, the 3D viewer, and the data products. Its main unfinished areas are adaptive receptor wiring, HGT calibration, and broader chemistry expansion.
 
 ## Documentation
 

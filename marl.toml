@@ -50,6 +50,12 @@ hill_exponent_clamp_low = 0.5
 hill_exponent_clamp_high = 8.0
 active_reaction_threshold = 0.000000001
 
+hgt_enabled = false
+hgt_interval = 10
+hgt_radius = 1
+hgt_base_rate = 0.02
+hgt_max_events_per_tick = 100
+
 seed_margin = 5
 phototroph_z_lo = 0.0
 phototroph_z_hi = 3.0

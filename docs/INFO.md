@@ -17,7 +17,7 @@ The project has a clean split between environment, cells, orchestration, and out
 - `crates/marl-engine/src/main.rs` ties everything together: seeding, tick order, births, deaths, and output cadence.
 - `crates/marl-output/src/data.rs` and `crates/marl-output/src/snapshot.rs` convert state into files for later analysis.
 - `crates/marl-analysis` and `crates/marl-analyze` provide the canonical headless analysis workflow for completed runs.
-- `crates/marl-engine/src/hgt.rs` contains a horizontal gene transfer primitive that is currently not invoked.
+- `crates/marl-cell/src/hgt.rs` contains the reaction-rule HGT primitive, invoked by the optional local HGT phase in `crates/marl-sim/src/lib.rs`.
 - `crates/marl-output/src/binary_dump.rs` writes raw binary field arrays, compact viewer cell records, and `run_meta.json`.
 - `crates/marl-format/src/lib.rs` owns the shared binary schema (`RunMeta`, `ViewerCellRecord`, field layout constants).
 
@@ -261,7 +261,7 @@ The project is in a good prototype state. It is not a toy, but it is also not ye
 ### Present But Not Fully Integrated
 
 - receptor activations are computed but not used
-- HGT transfer logic exists but is not called
+- optional HGT is wired into the tick loop, but disabled by default and still experimental
 - signaling species exist in the chemistry space but are not meaningfully used by starters
 - structural deposit species affects diffusion, but current starter metabolisms do not actively build a structural niche
 
@@ -296,7 +296,7 @@ If you want to reacquire context quickly, this is the best reading sequence:
 5. `crates/marl-engine/src/light.rs`
 6. `crates/marl-output/src/data.rs`
 7. `crates/marl-output/src/snapshot.rs`
-8. `crates/marl-engine/src/hgt.rs`
+8. `crates/marl-cell/src/hgt.rs`
 9. `crates/marl-output/src/binary_dump.rs`
 10. `crates/marl-format/src/lib.rs`
 
@@ -304,4 +304,4 @@ That order follows the dependency chain from assumptions, to field physics, to c
 
 ## Bottom Line
 
-The codebase today is best described as a coherent CPU research prototype for spatial microbial evolution. Its strongest ideas are already in place: spatial exclusion, chemically mediated interaction, depth-structured ecology, lineage-producing division, and decent analysis outputs. Its most obvious unfinished step is moving from passive chemistry-following cells to cells whose sensing machinery actually modulates behavior, with HGT as a secondary unfinished branch.
+The codebase today is best described as a coherent CPU research prototype for spatial microbial evolution. Its strongest ideas are already in place: spatial exclusion, chemically mediated interaction, depth-structured ecology, lineage-producing division, optional local HGT, and decent analysis outputs. Its most obvious unfinished step is moving from passive chemistry-following cells to cells whose sensing machinery actually modulates behavior, with HGT remaining an experimental branch rather than a calibrated biological model.

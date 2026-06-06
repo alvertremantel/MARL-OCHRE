@@ -271,21 +271,52 @@ pub fn find_empty_neighbor_avoiding(
     }
 }
 
-#[allow(dead_code)] // TODO: used by HGT when re-enabled
+pub fn nearby_cell_indices(
+    grid: GridDims,
+    pos: [u16; 3],
+    cell_map: &HashMap<[u16; 3], usize>,
+    radius: u8,
+) -> Vec<usize> {
+    if radius == 0 {
+        return Vec::new();
+    }
+
+    let radius = radius as i32;
+    let mut found = Vec::new();
+    for dz in -radius..=radius {
+        for dy in -radius..=radius {
+            for dx in -radius..=radius {
+                if dx == 0 && dy == 0 && dz == 0 {
+                    continue;
+                }
+                let nx = pos[0] as i32 + dx;
+                let ny = pos[1] as i32 + dy;
+                let nz = pos[2] as i32 + dz;
+                if nx < 0
+                    || nx >= grid.x as i32
+                    || ny < 0
+                    || ny >= grid.y as i32
+                    || nz < 0
+                    || nz >= grid.z as i32
+                {
+                    continue;
+                }
+                let npos = [nx as u16, ny as u16, nz as u16];
+                if let Some(&idx) = cell_map.get(&npos) {
+                    found.push(idx);
+                }
+            }
+        }
+    }
+    found
+}
+
 pub fn find_cell_neighbor(
     grid: GridDims,
     pos: [u16; 3],
     cell_map: &HashMap<[u16; 3], usize>,
 ) -> Option<usize> {
-    let offsets: [(i32, i32, i32); 6] = [
-        (1, 0, 0),
-        (-1, 0, 0),
-        (0, 1, 0),
-        (0, -1, 0),
-        (0, 0, 1),
-        (0, 0, -1),
-    ];
-    for &(dx, dy, dz) in &offsets {
+    for &(dx, dy, dz) in &FACE_OFFSETS {
         let nx = pos[0] as i32 + dx;
         let ny = pos[1] as i32 + dy;
         let nz = pos[2] as i32 + dz;
@@ -376,6 +407,22 @@ mod tests {
         assert_eq!(neighbors.len(), 5);
         assert!(!neighbors.contains(&[2, 1, 1]));
         assert!(!neighbors.contains(&[2, 2, 1]));
+    }
+
+    #[test]
+    fn nearby_cell_scan_uses_bounded_local_radius() {
+        let grid = GridDims { x: 5, y: 5, z: 5 };
+        let cell_map = HashMap::from([
+            ([2, 2, 2], 0),
+            ([3, 2, 2], 1),
+            ([3, 3, 2], 2),
+            ([4, 2, 2], 3),
+        ]);
+
+        let mut near = nearby_cell_indices(grid, [2, 2, 2], &cell_map, 1);
+        near.sort_unstable();
+        assert_eq!(near, vec![1, 2]);
+        assert!(nearby_cell_indices(grid, [2, 2, 2], &cell_map, 0).is_empty());
     }
 
     #[test]
