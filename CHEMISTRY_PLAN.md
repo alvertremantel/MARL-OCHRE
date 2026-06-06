@@ -144,8 +144,22 @@ model stable.
   `rng_seed` metadata into reports and, when multiple zero-byproduct controls
   are present, applies byproduct excess-pool adjustments against the matching
   same-seed baseline instead of the first control run.
+- Seed-paired byproduct pilot: a 24x24x12, 241-tick pilot over seeds 41001 and
+  41002 compared zero/default/high byproduct strengths in one multi-run compare.
+  The new seed-paired adjustment produced low excess retained fractions:
+  default 0.040 and 0.026, high 0.126 and 0.072. No automated cross-feeding or
+  public-pool candidates were reported, and final populations stayed close to
+  their same-seed zero controls. Gross retained fractions remained misleadingly
+  high because background organic dominates the field pool.
+- Calibration scaling issue: full `stoich_v2_events.csv` logging is now a
+  practical bottleneck for replicated sweeps. One 24x24x12, 241-tick
+  default-strength pilot run produced a roughly 515 MiB event log. Before the
+  larger 4-seed 48x48x24 sweep, add a summary/counter mode or event filtering
+  for calibration-relevant stoichiometry so replicated runs are not mostly I/O.
 
-The next implementation target is replicated byproduct calibration experiments:
-run longer controlled sweeps with zero-byproduct baselines, quantify when routed
-byproducts create cross-feeding versus runaway public goods, then use those
-measurements to tune defaults or add richer explicit residual chemistry.
+The next implementation target is stoichiometry event-output reduction for
+calibration: preserve the byproduct/leakage totals and per-species calibration
+signals needed by `marl-analyze`, but avoid writing millions of full event rows
+when a run only needs summary-scale chemistry diagnostics. After that, run the
+larger replicated byproduct sweep and tune defaults or residual chemistry from
+the paired-seed measurements.
