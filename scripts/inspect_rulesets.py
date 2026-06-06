@@ -15,11 +15,13 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+import json
 import struct
 import subprocess
 import sys
 from collections import Counter
 from pathlib import Path
+from typing import Optional
 
 # ---------------------------------------------------------------------------
 # Format constants (mirroring marl-format/src/lib.rs)
@@ -121,6 +123,62 @@ def read_maybe_compressed(path: Path) -> bytes:
         except subprocess.CalledProcessError as exc:
             sys.exit(f"Error: failed to decompress {path}: {exc}")
     return path.read_bytes()
+
+
+def parse_tick(raw_tick: str) -> int:
+    """Parse a CLI tick argument with a clearer error than argparse's int."""
+    try:
+        tick = int(raw_tick, 10)
+    except ValueError:
+        sys.exit(f"Error: malformed tick {raw_tick!r}; expected a non-negative integer")
+    if tick < 0:
+        sys.exit(f"Error: malformed tick {raw_tick!r}; expected a non-negative integer")
+    return tick
+
+
+def load_run_meta(run_dir: Path) -> dict:
+    """Load run_meta.json from an engine output directory."""
+    meta_path = run_dir / "run_meta.json"
+    if not meta_path.exists():
+        sys.exit(f"Error: run metadata not found: {meta_path}")
+    try:
+        return json.loads(meta_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        sys.exit(f"Error: invalid run metadata {meta_path}: {exc}")
+
+
+def resolve_pattern(meta: dict, key: str, tick: int) -> Path:
+    """Resolve a run_meta.json snapshot pattern by substituting the tick."""
+    pattern = meta.get(key)
+    if not isinstance(pattern, str) or not pattern:
+        sys.exit(
+            "Error: full ruleset output is off or missing in run_meta.json "
+            f"({key} is absent)"
+        )
+    if "<T>" not in pattern:
+        sys.exit(f"Error: {key} must contain <T> tick placeholder: {pattern!r}")
+    return Path(pattern.replace("<T>", str(tick)))
+
+
+def resolve_input_path(path_or_run_dir: Path, raw_tick: Optional[str]) -> Path:
+    """Resolve either direct-file usage or RUN_DIR TICK usage."""
+    if raw_tick is None:
+        if path_or_run_dir.is_dir():
+            sys.exit(
+                "Error: direct-file usage requires a ruleset file path; "
+                "for a run directory use: scripts/inspect_rulesets.py RUN_DIR TICK"
+            )
+        return path_or_run_dir
+
+    tick = parse_tick(raw_tick)
+    run_dir = path_or_run_dir
+    if not run_dir.exists():
+        sys.exit(f"Error: run directory not found: {run_dir}")
+    if not run_dir.is_dir():
+        sys.exit(f"Error: RUN_DIR is not a directory: {run_dir}")
+
+    meta = load_run_meta(run_dir)
+    return run_dir / resolve_pattern(meta, "ruleset_full_file_pattern", tick)
 
 
 def validate_header(
@@ -339,15 +397,21 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""\
 Examples:
+  python scripts/inspect_rulesets.py output/run_128x128x64 1000
   python scripts/inspect_rulesets.py output/run_128x128x64/tick_1000.rulesets.bin.zst
   python scripts/inspect_rulesets.py /tmp/opencode/marl_output_ruleset_full_test/tick_10.rulesets.bin.zst
   python scripts/inspect_rulesets.py output/run_128x128x64/tick_500.rulesets.bin
         """,
     )
     parser.add_argument(
-        "file",
+        "path",
         type=Path,
-        help="Path to a tick_<T>.rulesets.bin or .bin.zst file",
+        help="Path to a ruleset file, or a run directory when TICK is provided",
+    )
+    parser.add_argument(
+        "tick",
+        nargs="?",
+        help="Tick to inspect when PATH is a run directory",
     )
     parser.add_argument(
         "--no-glimpse",
@@ -371,7 +435,7 @@ Examples:
     )
     args = parser.parse_args()
 
-    path = args.file
+    path = resolve_input_path(args.path, args.tick)
     if not path.exists():
         sys.exit(f"Error: file not found: {path}")
 

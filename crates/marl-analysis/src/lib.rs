@@ -48,8 +48,11 @@ pub struct RunAnalysis {
     pub trajectory: Option<TrajectorySummary>,
     pub zonation: Option<ZonationSummary>,
     pub cells: Option<CellSummary>,
+    pub cell_timeline: Vec<CellSummary>,
     pub chemistry: Vec<SnapshotChemistry>,
     pub rulesets: Option<RulesetSummary>,
+    pub ruleset_timeline: Vec<RulesetSummary>,
+    pub transporter_pair_timeline: Vec<TransportPairTimeline>,
     pub findings: Vec<Finding>,
     pub warnings: Vec<String>,
 }
@@ -118,6 +121,19 @@ pub struct CellSummary {
     pub min_energy: f32,
     pub max_energy: f32,
     pub starter_counts: [u64; 4],
+    pub starter_ancestry: Vec<StarterAncestrySummary>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct StarterAncestrySummary {
+    pub starter_type: u8,
+    pub label: String,
+    pub count: u64,
+    pub fraction: f64,
+    pub avg_energy: f64,
+    pub top_count: u64,
+    pub middle_count: u64,
+    pub deep_count: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -135,6 +151,8 @@ pub struct SnapshotChemistry {
 pub struct SpeciesProfile {
     pub species: usize,
     pub name: String,
+    pub total_concentration: f64,
+    pub max_value: f64,
     pub surface_mean: f64,
     pub middle_mean: f64,
     pub deep_mean: f64,
@@ -185,6 +203,25 @@ pub struct GenotypeTransportSummary {
     pub gated_slots: u32,
     pub uptake_dominant_slots: u32,
     pub secretion_dominant_slots: u32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TransportPairTimeline {
+    pub ext_species: u8,
+    pub int_species: u8,
+    pub total_active_slots: u64,
+    pub first_tick: Option<u64>,
+    pub latest_tick: Option<u64>,
+    pub points: Vec<TransportPairTimelinePoint>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TransportPairTimelinePoint {
+    pub tick: u64,
+    pub active_slots: u64,
+    pub avg_uptake_rate: f64,
+    pub avg_secrete_rate: f64,
+    pub gated_slots: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -278,42 +315,46 @@ pub fn analyze_run(run_dir: impl AsRef<Path>, cfg: &AnalysisConfig) -> AnalysisR
         }
     }
 
+    let mut cell_timeline = Vec::new();
+    for &tick in &sampled_ticks {
+        match load_cell_records(run_dir, tick, &meta) {
+            Ok(cells) => {
+                if zonation.is_none() && sampled_ticks.last().copied() == Some(tick) {
+                    zonation = Some(summarize_zonation_from_cells(meta.grid_z as usize, &cells));
+                }
+                cell_timeline.push(summarize_cells(tick, meta.grid_z as usize, &cells));
+            }
+            Err(err) => {
+                warnings.push(format!("tick {tick}: cell analysis skipped: {err}"));
+            }
+        }
+    }
     let latest_tick = sampled_ticks
         .last()
         .copied()
         .or_else(|| available_ticks.last().copied());
-    let cells = if let Some(tick) = latest_tick {
-        match load_cell_records(run_dir, tick, &meta) {
-            Ok(cells) => {
-                if zonation.is_none() {
-                    zonation = Some(summarize_zonation_from_cells(meta.grid_z as usize, &cells));
-                }
-                Some(summarize_cells(tick, &cells))
-            }
-            Err(err) => {
-                warnings.push(format!("tick {tick}: cell analysis skipped: {err}"));
-                None
-            }
-        }
-    } else {
-        None
-    };
+    let cells = cell_timeline.last().cloned();
 
-    let rulesets = if cfg.include_rulesets {
-        if let Some(tick) = latest_tick {
-            match summarize_rulesets(run_dir, tick, &meta) {
-                Ok(summary) => Some(summary),
-                Err(err) => {
-                    warnings.push(format!("tick {tick}: ruleset analysis skipped: {err}"));
-                    None
+    let mut ruleset_timeline = Vec::new();
+    if cfg.include_rulesets && latest_tick.is_some() {
+        if full_rulesets_enabled(run_dir)? {
+            for &tick in &sampled_ticks {
+                match summarize_rulesets(run_dir, tick, &meta) {
+                    Ok(summary) => ruleset_timeline.push(summary),
+                    Err(err) => {
+                        warnings.push(format!("tick {tick}: ruleset analysis skipped: {err}"));
+                    }
                 }
             }
         } else {
-            None
+            warnings.push(
+                "ruleset analysis skipped: full ruleset dumps were not enabled for this run"
+                    .to_string(),
+            );
         }
-    } else {
-        None
-    };
+    }
+    let rulesets = ruleset_timeline.last().cloned();
+    let transporter_pair_timeline = summarize_transporter_pair_timeline(&ruleset_timeline);
 
     let mut analysis = RunAnalysis {
         run_dir: run_dir.to_path_buf(),
@@ -323,8 +364,11 @@ pub fn analyze_run(run_dir: impl AsRef<Path>, cfg: &AnalysisConfig) -> AnalysisR
         trajectory,
         zonation,
         cells,
+        cell_timeline,
         chemistry,
         rulesets,
+        ruleset_timeline,
+        transporter_pair_timeline,
         findings: Vec::new(),
         warnings,
     };
@@ -437,6 +481,22 @@ pub fn render_run_terminal(analysis: &RunAnalysis) -> String {
             zonation.occupied_z_max
         ));
     }
+    if let Some(cells) = &analysis.cells {
+        let ancestry = cells
+            .starter_ancestry
+            .iter()
+            .map(|starter| {
+                format!(
+                    "{}:{} ({:.1}%)",
+                    starter.label,
+                    starter.count,
+                    starter.fraction * 100.0
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        out.push_str(&format!("  ancestry: {ancestry}\n"));
+    }
     if let Some(rulesets) = &analysis.rulesets {
         out.push_str(&format!(
             "  rulesets: {} unique / {} cells, dominant {:.1}%, H={:.2}\n",
@@ -468,6 +528,47 @@ pub fn render_run_terminal(analysis: &RunAnalysis) -> String {
                 .join(", ");
             out.push_str(&format!("  common transporter pairs: {pairs}\n"));
         }
+    }
+    if analysis.ruleset_timeline.len() > 1 {
+        out.push_str(&format!(
+            "  ruleset timeline: {} sampled ticks, active transport {:.2}->{:.2}/cell, gated {:.2}->{:.2}/cell\n",
+            analysis.ruleset_timeline.len(),
+            analysis
+                .ruleset_timeline
+                .first()
+                .map(|rulesets| rulesets.transporters.avg_active_per_cell)
+                .unwrap_or(0.0),
+            analysis
+                .ruleset_timeline
+                .last()
+                .map(|rulesets| rulesets.transporters.avg_active_per_cell)
+                .unwrap_or(0.0),
+            analysis
+                .ruleset_timeline
+                .first()
+                .map(|rulesets| rulesets.transporters.gated_slots as f64 / rulesets.cell_count.max(1) as f64)
+                .unwrap_or(0.0),
+            analysis
+                .ruleset_timeline
+                .last()
+                .map(|rulesets| rulesets.transporters.gated_slots as f64 / rulesets.cell_count.max(1) as f64)
+                .unwrap_or(0.0)
+        ));
+    }
+    if let (Some(first), Some(latest)) = (
+        leading_transport_pair(analysis.ruleset_timeline.first()),
+        leading_transport_pair(analysis.ruleset_timeline.last()),
+    ) && (first.ext_species, first.int_species) != (latest.ext_species, latest.int_species)
+    {
+        out.push_str(&format!(
+            "  leading transporter pair changed: ext{}->int{} (tick {}) -> ext{}->int{} (tick {})\n",
+            first.ext_species,
+            first.int_species,
+            analysis.ruleset_timeline.first().map(|rulesets| rulesets.tick).unwrap_or(0),
+            latest.ext_species,
+            latest.int_species,
+            analysis.ruleset_timeline.last().map(|rulesets| rulesets.tick).unwrap_or(0)
+        ));
     }
     for finding in &analysis.findings {
         out.push_str(&format!(
@@ -515,6 +616,12 @@ pub fn render_comparison_terminal(analysis: &ComparisonAnalysis) -> String {
     out
 }
 
+fn leading_transport_pair(rulesets: Option<&RulesetSummary>) -> Option<&TransportPairSummary> {
+    rulesets
+        .and_then(|rulesets| rulesets.transporters.common_pairs.first())
+        .filter(|pair| pair.active_slots > 0)
+}
+
 pub fn render_run_markdown(analysis: &RunAnalysis) -> String {
     let mut out = String::new();
     out.push_str(&format!(
@@ -556,6 +663,45 @@ pub fn render_run_markdown(analysis: &RunAnalysis) -> String {
             zonation.occupied_z_max,
             zonation.entropy
         ));
+    }
+    if let Some(cells) = &analysis.cells
+        && !cells.starter_ancestry.is_empty()
+    {
+        out.push_str("\n## Starter Ancestry\n\n");
+        out.push_str(&format!(
+            "- Latest cell snapshot: tick {} ({} cells)\n",
+            cells.tick, cells.count
+        ));
+        out.push_str("| starter | cells | fraction | avg_energy | top | middle | deep |\n");
+        out.push_str("|---|---:|---:|---:|---:|---:|---:|\n");
+        for starter in &cells.starter_ancestry {
+            out.push_str(&format!(
+                "| {} | {} | {:.1}% | {:.3} | {} | {} | {} |\n",
+                starter.label,
+                starter.count,
+                starter.fraction * 100.0,
+                starter.avg_energy,
+                starter.top_count,
+                starter.middle_count,
+                starter.deep_count
+            ));
+        }
+    }
+    if analysis.cell_timeline.len() > 1 {
+        out.push_str("\n### Ancestry Timeline\n\n");
+        out.push_str("| tick | cells | phototroph | chemolithotroph | anaerobe | other |\n");
+        out.push_str("|---:|---:|---:|---:|---:|---:|\n");
+        for cells in &analysis.cell_timeline {
+            out.push_str(&format!(
+                "| {} | {} | {} | {} | {} | {} |\n",
+                cells.tick,
+                cells.count,
+                cells.starter_counts[0],
+                cells.starter_counts[1],
+                cells.starter_counts[2],
+                cells.starter_counts[3]
+            ));
+        }
     }
     if !analysis.chemistry.is_empty() {
         out.push_str("\n## Chemistry\n\n");
@@ -621,6 +767,58 @@ pub fn render_run_markdown(analysis: &RunAnalysis) -> String {
                     pair.gated_slots
                 ));
             }
+        }
+    }
+    if analysis.ruleset_timeline.len() > 1 {
+        out.push_str("\n### Ruleset Timeline\n\n");
+        out.push_str("| tick | cells | unique | dominant% | shannon | active_transport/cell | gated_transport/cell | avg_abs_gate |\n");
+        out.push_str("|---:|---:|---:|---:|---:|---:|---:|---:|\n");
+        for rulesets in &analysis.ruleset_timeline {
+            out.push_str(&format!(
+                "| {} | {} | {} | {:.1}% | {:.3} | {:.2} | {:.2} | {:.3} |\n",
+                rulesets.tick,
+                rulesets.cell_count,
+                rulesets.unique_count,
+                rulesets.dominant_fraction * 100.0,
+                rulesets.shannon_diversity,
+                rulesets.transporters.avg_active_per_cell,
+                rulesets.transporters.gated_slots as f64 / rulesets.cell_count.max(1) as f64,
+                rulesets.transporters.avg_abs_gate_weight
+            ));
+        }
+    }
+    if !analysis.transporter_pair_timeline.is_empty() {
+        out.push_str("\n### Transporter Pair Timeline\n\n");
+        out.push_str("| tick |");
+        for pair in &analysis.transporter_pair_timeline {
+            out.push_str(&format!(
+                " ext{}->int{} |",
+                pair.ext_species, pair.int_species
+            ));
+        }
+        out.push('\n');
+        out.push_str("|---:|");
+        for _ in &analysis.transporter_pair_timeline {
+            out.push_str("---:|");
+        }
+        out.push('\n');
+        for point_index in 0..analysis.transporter_pair_timeline[0].points.len() {
+            let tick = analysis.transporter_pair_timeline[0].points[point_index].tick;
+            out.push_str(&format!("| {tick} |"));
+            for pair in &analysis.transporter_pair_timeline {
+                let point = &pair.points[point_index];
+                if point.active_slots == 0 {
+                    out.push_str(" - |");
+                } else if point.gated_slots > 0 {
+                    out.push_str(&format!(
+                        " {} (g{}) |",
+                        point.active_slots, point.gated_slots
+                    ));
+                } else {
+                    out.push_str(&format!(" {} |", point.active_slots));
+                }
+            }
+            out.push('\n');
         }
     }
     out.push_str("\n## Findings\n\n");
@@ -856,21 +1054,51 @@ fn summarize_zonation_from_cells(z_layers: usize, cells: &[LoadedCell]) -> Zonat
     summarize_zonation(&z_counts)
 }
 
-fn summarize_cells(tick: u64, cells: &[LoadedCell]) -> CellSummary {
+fn summarize_cells(tick: u64, z_layers: usize, cells: &[LoadedCell]) -> CellSummary {
     let mut starter_counts = [0; 4];
+    let mut starter_energy_sums = [0.0; 4];
+    let mut starter_zone_counts = [[0u64; 3]; 4];
     let mut sum = 0.0;
     let mut min_energy = f32::INFINITY;
     let mut max_energy = f32::NEG_INFINITY;
+    let third = z_layers / 3;
+    let two_thirds = 2 * z_layers / 3;
     for cell in cells {
         let starter = match cell.starter_type {
             0..=2 => cell.starter_type as usize,
             _ => 3,
         };
         starter_counts[starter] += 1;
+        starter_energy_sums[starter] += cell.energy as f64;
+        let z = cell.pos[2] as usize;
+        let zone = if z < third {
+            0
+        } else if z < two_thirds {
+            1
+        } else {
+            2
+        };
+        starter_zone_counts[starter][zone] += 1;
         sum += cell.energy as f64;
         min_energy = min_energy.min(cell.energy);
         max_energy = max_energy.max(cell.energy);
     }
+    let total = cells.len() as u64;
+    let starter_ancestry = starter_counts
+        .iter()
+        .enumerate()
+        .filter(|(_, count)| **count > 0)
+        .map(|(starter, count)| StarterAncestrySummary {
+            starter_type: starter as u8,
+            label: starter_label(starter as u8).to_string(),
+            count: *count,
+            fraction: fraction(*count, total),
+            avg_energy: starter_energy_sums[starter] / *count as f64,
+            top_count: starter_zone_counts[starter][0],
+            middle_count: starter_zone_counts[starter][1],
+            deep_count: starter_zone_counts[starter][2],
+        })
+        .collect();
     CellSummary {
         tick,
         count: cells.len(),
@@ -882,6 +1110,7 @@ fn summarize_cells(tick: u64, cells: &[LoadedCell]) -> CellSummary {
         min_energy: if cells.is_empty() { 0.0 } else { min_energy },
         max_energy: if cells.is_empty() { 0.0 } else { max_energy },
         starter_counts,
+        starter_ancestry,
     }
 }
 
@@ -906,8 +1135,10 @@ fn summarize_field(tick: u64, meta: &RunMeta, bytes: &[u8]) -> AnalysisResult<Sn
         .into());
     }
 
-    let tracked_species = [1usize, 2, 3, 4];
+    let tracked_species = [0usize, 1, 2, 3, 4];
     let mut sums = vec![vec![0.0; z]; tracked_species.len()];
+    let mut totals = vec![0.0; tracked_species.len()];
+    let mut max_values = vec![f64::NEG_INFINITY; tracked_species.len()];
     let mut nonfinite_values = 0;
     let mut negative_values = 0;
     for (i, chunk) in bytes.chunks_exact(4).enumerate() {
@@ -923,7 +1154,10 @@ fn summarize_field(tick: u64, meta: &RunMeta, bytes: &[u8]) -> AnalysisResult<Sn
         if let Some(species_index) = tracked_species.iter().position(|s| *s == species) {
             let voxel = i / s_ext;
             let z_index = voxel / (x * y);
-            sums[species_index][z_index] += value as f64;
+            let value = value as f64;
+            sums[species_index][z_index] += value;
+            totals[species_index] += value;
+            max_values[species_index] = max_values[species_index].max(value);
         }
     }
 
@@ -938,6 +1172,12 @@ fn summarize_field(tick: u64, meta: &RunMeta, bytes: &[u8]) -> AnalysisResult<Sn
             SpeciesProfile {
                 species: *species,
                 name: species_name(*species).to_string(),
+                total_concentration: totals[i],
+                max_value: if max_values[i].is_finite() {
+                    max_values[i]
+                } else {
+                    0.0
+                },
                 surface_mean: per_z_mean.first().copied().unwrap_or(0.0),
                 middle_mean: per_z_mean.get(mid).copied().unwrap_or(0.0),
                 deep_mean: per_z_mean.last().copied().unwrap_or(0.0),
@@ -971,6 +1211,16 @@ fn summarize_field(tick: u64, meta: &RunMeta, bytes: &[u8]) -> AnalysisResult<Sn
         redox_overlap_layers,
         species_profiles: profiles,
     })
+}
+
+fn full_rulesets_enabled(run_dir: &Path) -> AnalysisResult<bool> {
+    let meta_json: serde_json::Value =
+        serde_json::from_slice(&fs::read(run_dir.join("run_meta.json"))?)?;
+    let mode = meta_json
+        .get("ruleset_output_mode")
+        .and_then(|value| value.as_str())
+        .unwrap_or("off");
+    Ok(mode == "full" || mode == "both")
 }
 
 fn summarize_rulesets(run_dir: &Path, tick: u64, meta: &RunMeta) -> AnalysisResult<RulesetSummary> {
@@ -1209,6 +1459,106 @@ fn summarize_transporters_from_rulesets(
     })
 }
 
+fn summarize_transporter_pair_timeline(
+    ruleset_timeline: &[RulesetSummary],
+) -> Vec<TransportPairTimeline> {
+    if ruleset_timeline.is_empty() {
+        return Vec::new();
+    }
+
+    let mut totals: HashMap<(u8, u8), u64> = HashMap::new();
+    for rulesets in ruleset_timeline {
+        for pair in &rulesets.transporters.common_pairs {
+            *totals
+                .entry((pair.ext_species, pair.int_species))
+                .or_insert(0) += pair.active_slots;
+        }
+    }
+
+    let mut selected = Vec::new();
+    if let Some(latest) = ruleset_timeline.last() {
+        for pair in &latest.transporters.common_pairs {
+            push_unique_pair(&mut selected, (pair.ext_species, pair.int_species));
+        }
+    }
+    for rulesets in ruleset_timeline {
+        if let Some(pair) = rulesets.transporters.common_pairs.first() {
+            push_unique_pair(&mut selected, (pair.ext_species, pair.int_species));
+        }
+    }
+
+    let mut by_total = totals
+        .iter()
+        .map(|(pair, total)| (*pair, *total))
+        .collect::<Vec<_>>();
+    by_total.sort_by(|((a_ext, a_int), a_total), ((b_ext, b_int), b_total)| {
+        b_total
+            .cmp(a_total)
+            .then_with(|| a_ext.cmp(b_ext))
+            .then_with(|| a_int.cmp(b_int))
+    });
+    for (pair, _) in by_total {
+        push_unique_pair(&mut selected, pair);
+        if selected.len() >= MAX_COMMON_TRANSPORT_PAIRS {
+            break;
+        }
+    }
+
+    selected
+        .into_iter()
+        .take(MAX_COMMON_TRANSPORT_PAIRS)
+        .map(|(ext_species, int_species)| {
+            let points = ruleset_timeline
+                .iter()
+                .map(|rulesets| {
+                    rulesets
+                        .transporters
+                        .common_pairs
+                        .iter()
+                        .find(|pair| {
+                            pair.ext_species == ext_species && pair.int_species == int_species
+                        })
+                        .map(|pair| TransportPairTimelinePoint {
+                            tick: rulesets.tick,
+                            active_slots: pair.active_slots,
+                            avg_uptake_rate: pair.avg_uptake_rate,
+                            avg_secrete_rate: pair.avg_secrete_rate,
+                            gated_slots: pair.gated_slots,
+                        })
+                        .unwrap_or(TransportPairTimelinePoint {
+                            tick: rulesets.tick,
+                            active_slots: 0,
+                            avg_uptake_rate: 0.0,
+                            avg_secrete_rate: 0.0,
+                            gated_slots: 0,
+                        })
+                })
+                .collect::<Vec<_>>();
+            TransportPairTimeline {
+                ext_species,
+                int_species,
+                total_active_slots: *totals.get(&(ext_species, int_species)).unwrap_or(&0),
+                first_tick: points
+                    .iter()
+                    .find(|point| point.active_slots > 0)
+                    .map(|point| point.tick),
+                latest_tick: points
+                    .iter()
+                    .rev()
+                    .find(|point| point.active_slots > 0)
+                    .map(|point| point.tick),
+                points,
+            }
+        })
+        .collect()
+}
+
+fn push_unique_pair(pairs: &mut Vec<(u8, u8)>, pair: (u8, u8)) {
+    if pairs.len() < MAX_COMMON_TRANSPORT_PAIRS && !pairs.contains(&pair) {
+        pairs.push(pair);
+    }
+}
+
 fn summarize_genotype_transport(
     payload: &[u8],
     transport_stride: usize,
@@ -1382,6 +1732,24 @@ fn classify_run_findings(analysis: &RunAnalysis) -> Vec<Finding> {
                 Vec::new(),
             ));
         }
+        if let Some(species0) = latest_chemistry
+            .species_profiles
+            .iter()
+            .find(|profile| profile.species == 0)
+            && species0.total_concentration > 1.0
+        {
+            findings.push(finding(
+                "external_species0_pool",
+                FindingLevel::Info,
+                "External species 0 accumulated",
+                "The latest inspected field contains a nontrivial pool of external species 0."
+                    .to_string(),
+                vec![
+                    format!("total {:.3}", species0.total_concentration),
+                    format!("max {:.3}", species0.max_value),
+                ],
+            ));
+        }
     }
     if let Some(rulesets) = &analysis.rulesets {
         if rulesets.cell_count > 0 && rulesets.dominant_fraction < 0.25 {
@@ -1518,11 +1886,21 @@ fn fraction(part: u64, total: u64) -> f64 {
 
 fn species_name(species: usize) -> &'static str {
     match species {
+        0 => "species0",
         1 => "oxidant",
         2 => "reductant",
         3 => "carbon",
         4 => "organic",
         _ => "unknown",
+    }
+}
+
+fn starter_label(starter_type: u8) -> &'static str {
+    match starter_type {
+        0 => "phototroph",
+        1 => "chemolithotroph",
+        2 => "anaerobe",
+        _ => "other",
     }
 }
 
@@ -1604,8 +1982,69 @@ mod tests {
             .iter()
             .find(|profile| profile.species == 1)
             .unwrap();
+        let species0 = summary
+            .species_profiles
+            .iter()
+            .find(|profile| profile.species == 0)
+            .unwrap();
         assert_eq!(summary.tick, 7);
+        assert_eq!(species0.per_z_mean, vec![0.0, 10.0]);
+        assert_eq!(species0.total_concentration, 10.0);
+        assert_eq!(species0.max_value, 10.0);
         assert_eq!(oxidant.per_z_mean, vec![1.0, 11.0]);
+    }
+
+    #[test]
+    fn cell_summary_reports_starter_ancestry_by_zone_and_energy() {
+        let cells = vec![
+            LoadedCell {
+                pos: [0, 0, 0],
+                lineage_id: 1,
+                starter_type: 0,
+                energy: 1.0,
+            },
+            LoadedCell {
+                pos: [0, 0, 5],
+                lineage_id: 2,
+                starter_type: 0,
+                energy: 3.0,
+            },
+            LoadedCell {
+                pos: [0, 0, 8],
+                lineage_id: 3,
+                starter_type: 2,
+                energy: 2.0,
+            },
+        ];
+
+        let summary = summarize_cells(42, 9, &cells);
+
+        assert_eq!(summary.starter_counts, [2, 0, 1, 0]);
+        let photo = summary
+            .starter_ancestry
+            .iter()
+            .find(|starter| starter.starter_type == 0)
+            .unwrap();
+        assert_eq!(photo.label, "phototroph");
+        assert_eq!(photo.count, 2);
+        assert!((photo.avg_energy - 2.0).abs() < 1e-9);
+        assert_eq!(
+            (photo.top_count, photo.middle_count, photo.deep_count),
+            (1, 1, 0)
+        );
+        let anaerobe = summary
+            .starter_ancestry
+            .iter()
+            .find(|starter| starter.starter_type == 2)
+            .unwrap();
+        assert_eq!(
+            (
+                anaerobe.top_count,
+                anaerobe.middle_count,
+                anaerobe.deep_count
+            ),
+            (0, 0, 1)
+        );
     }
 
     #[test]
@@ -1747,6 +2186,105 @@ mod tests {
         assert_eq!(common.gated_slots, 3);
     }
 
+    fn pair(ext_species: u8, int_species: u8, active_slots: u64) -> TransportPairSummary {
+        TransportPairSummary {
+            ext_species,
+            int_species,
+            active_slots,
+            avg_uptake_rate: active_slots as f64 / 10.0,
+            avg_secrete_rate: active_slots as f64 / 20.0,
+            gated_slots: active_slots / 2,
+        }
+    }
+
+    fn rulesets_with_pairs(tick: u64, common_pairs: Vec<TransportPairSummary>) -> RulesetSummary {
+        let active_slots = common_pairs.iter().map(|pair| pair.active_slots).sum();
+        let gated_slots = common_pairs.iter().map(|pair| pair.gated_slots).sum();
+        RulesetSummary {
+            tick,
+            unique_count: 1,
+            cell_count: 10,
+            dominant_dict_id: Some(0),
+            dominant_count: 10,
+            dominant_fraction: 1.0,
+            shannon_diversity: 0.0,
+            transporters: TransporterSummary {
+                active_slots,
+                avg_active_per_cell: active_slots as f64 / 10.0,
+                uptake_dominant_slots: active_slots,
+                secretion_dominant_slots: 0,
+                bidirectional_slots: 0,
+                gated_slots,
+                avg_abs_gate_weight: 0.5,
+                uptake_rate_sum: 0.0,
+                secretion_rate_sum: 0.0,
+                common_pairs,
+                dominant_genotype: None,
+            },
+        }
+    }
+
+    #[test]
+    fn transporter_pair_timeline_keeps_latest_and_changing_leaders() {
+        let timeline = vec![
+            rulesets_with_pairs(0, vec![pair(1, 2, 9), pair(5, 6, 2)]),
+            rulesets_with_pairs(10, vec![pair(3, 4, 8), pair(1, 2, 4)]),
+            rulesets_with_pairs(20, vec![pair(7, 8, 6), pair(3, 4, 5)]),
+        ];
+
+        let pair_timeline = summarize_transporter_pair_timeline(&timeline);
+
+        assert_eq!(
+            pair_timeline
+                .iter()
+                .map(|pair| (pair.ext_species, pair.int_species))
+                .collect::<Vec<_>>(),
+            vec![(7, 8), (3, 4), (1, 2), (5, 6)]
+        );
+        assert_eq!(
+            pair_timeline[0]
+                .points
+                .iter()
+                .map(|point| (point.tick, point.active_slots))
+                .collect::<Vec<_>>(),
+            vec![(0, 0), (10, 0), (20, 6)]
+        );
+        assert_eq!(pair_timeline[2].first_tick, Some(0));
+        assert_eq!(pair_timeline[2].latest_tick, Some(10));
+        assert_eq!(pair_timeline[2].total_active_slots, 13);
+    }
+
+    #[test]
+    fn markdown_renders_transporter_pair_timeline() {
+        let ruleset_timeline = vec![
+            rulesets_with_pairs(0, vec![pair(1, 2, 4)]),
+            rulesets_with_pairs(10, vec![pair(3, 4, 6), pair(1, 2, 2)]),
+        ];
+        let analysis = RunAnalysis {
+            run_dir: PathBuf::from("/tmp/example_run"),
+            grid: [1, 1, 1],
+            available_ticks: vec![0, 10],
+            sampled_ticks: vec![0, 10],
+            trajectory: None,
+            zonation: None,
+            cells: None,
+            cell_timeline: Vec::new(),
+            chemistry: Vec::new(),
+            rulesets: ruleset_timeline.last().cloned(),
+            transporter_pair_timeline: summarize_transporter_pair_timeline(&ruleset_timeline),
+            ruleset_timeline,
+            findings: Vec::new(),
+            warnings: Vec::new(),
+        };
+
+        let markdown = render_run_markdown(&analysis);
+
+        assert!(markdown.contains("### Transporter Pair Timeline"));
+        assert!(markdown.contains("| tick | ext3->int4 | ext1->int2 |"));
+        assert!(markdown.contains("| 0 | - | 4 (g2) |"));
+        assert!(markdown.contains("| 10 | 6 (g3) | 2 (g1) |"));
+    }
+
     #[test]
     fn report_writer_with_no_outputs_does_not_create_directory() {
         let out_dir = PathBuf::from("/tmp/marl_analysis_no_output_test");
@@ -1759,8 +2297,11 @@ mod tests {
             trajectory: None,
             zonation: None,
             cells: None,
+            cell_timeline: Vec::new(),
             chemistry: Vec::new(),
             rulesets: None,
+            ruleset_timeline: Vec::new(),
+            transporter_pair_timeline: Vec::new(),
             findings: Vec::new(),
             warnings: Vec::new(),
         };

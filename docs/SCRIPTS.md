@@ -106,6 +106,7 @@ must also be available on `PATH`.
 ### Usage
 
 ```bash
+python scripts/inspect_rulesets.py <run_dir> <tick>
 python scripts/inspect_rulesets.py <path_to_ruleset_file>
 python scripts/inspect_rulesets.py <path> --no-glimpse
 python scripts/inspect_rulesets.py <path> --no-cell-sample
@@ -115,7 +116,8 @@ python scripts/inspect_rulesets.py <path> --no-cell-sample
 
 | Argument | Description |
 |----------|-------------|
-| `file` | Path to a `tick_<N>.rulesets.bin` or `.bin.zst` file |
+| `run_dir tick` | Engine output directory plus tick number. The script reads `run_meta.json` and resolves `ruleset_full_file_pattern` exactly, including `.zst` compression suffix when present |
+| `file` | Direct path to a `tick_<N>.rulesets.bin` or `.bin.zst` file |
 | `--no-glimpse` | Skip the decoded ruleset entry glimpse (header + stats only) |
 | `--no-cell-sample` | Skip the per-cell ref position/dict_id sampling |
 | `--full-histogram` | Show complete dict usage histogram instead of top 10 |
@@ -144,6 +146,10 @@ On failure, exits non-zero with an error message describing the mismatch.
 ### Example
 
 ```bash
+$ python scripts/inspect_rulesets.py output/run_128x128x64 1000
+Inspecting: output/run_128x128x64/tick_1000.rulesets.bin.zst
+  Raw size: 52,526 bytes
+
 $ python scripts/inspect_rulesets.py output/run_128x128x64/tick_1000.rulesets.bin.zst
 Inspecting: output/run_128x128x64/tick_1000.rulesets.bin.zst
   Raw size: 52,526 bytes
@@ -196,8 +202,11 @@ integrity during development or after an engine run:
 
 ```bash
 # Inspect a specific tick's ruleset dump
+python scripts/inspect_rulesets.py output/run_128x128x64 5000
+
+# Inspect a direct sidecar path
 python scripts/inspect_rulesets.py output/run_128x128x64/tick_5000.rulesets.bin.zst
 
 # Headers-only summary (no ruleset glimpse, no cell refs)
-python scripts/inspect_rulesets.py --no-glimpse --no-cell-sample output/run_128x128x64/tick_5000.rulesets.bin.zst
+python scripts/inspect_rulesets.py --no-glimpse --no-cell-sample output/run_128x128x64 5000
 ```
