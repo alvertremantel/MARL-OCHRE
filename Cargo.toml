@@ -24,6 +24,7 @@ edition = "2024"
 bytemuck = { version = "1.25", features = ["derive"] }
 pollster = "0.4"
 rand = "0.9"
+rand_chacha = "0.9"
 rand_distr = "0.5"
 rayon = "1.10"
 serde = { version = "1", features = ["derive"] }

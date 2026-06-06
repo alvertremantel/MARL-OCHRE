@@ -520,6 +520,7 @@ pub struct SimulationConfig {
     pub dx: f32,
     pub dt: f32,
     pub diffusion_substeps: usize,
+    pub rng_seed: Option<u64>,
 
     // Diffusion & decay (arrays, length S_EXT)
     pub d_voxel: [f32; S_EXT],
@@ -610,6 +611,7 @@ impl Default for SimulationConfig {
             dx: 100.0e-6,
             dt: 1.0,
             diffusion_substeps: 10,
+            rng_seed: None,
 
             d_voxel: default_external_diffusion(),
             lambda_decay: default_external_decay(),
@@ -1125,49 +1127,68 @@ impl Config {
             Err(_) => {}
         }
 
-        // 3. CLI override (run-control flags only)
+        if let Err(err) = cfg.apply_cli_overrides(&args) {
+            eprintln!("Error: {err}");
+            std::process::exit(2);
+        }
+
+        cfg
+    }
+
+    fn apply_cli_overrides(&mut self, args: &[String]) -> Result<(), String> {
+        // CLI override (run-control flags only)
         let mut i = 1;
         while i < args.len() {
             match args[i].as_str() {
                 "--config" => i += 2,
+                "--rng-seed" => {
+                    if i + 1 >= args.len() {
+                        return Err("--rng-seed requires a u64 value".to_string());
+                    }
+                    let v = args[i + 1].parse::<u64>().map_err(|_| {
+                        format!("--rng-seed requires a u64 value, got '{}'", args[i + 1])
+                    })?;
+                    self.simulation.rng_seed = Some(v);
+                    i += 2;
+                }
                 "--ticks" if i + 1 < args.len() => {
                     if let Ok(v) = args[i + 1].parse() {
-                        cfg.output.max_ticks = v;
+                        self.output.max_ticks = v;
                     }
                     i += 2;
                 }
                 "--stats" if i + 1 < args.len() => {
                     if let Ok(v) = args[i + 1].parse() {
-                        cfg.output.stats_interval = v;
+                        self.output.stats_interval = v;
                     }
                     i += 2;
                 }
                 "--snapshot" if i + 1 < args.len() => {
                     if let Ok(v) = args[i + 1].parse() {
-                        cfg.output.snapshot_interval = v;
+                        self.output.snapshot_interval = v;
                     }
                     i += 2;
                 }
                 "--ruleset-interval" if i + 1 < args.len() => {
                     if let Ok(v) = args[i + 1].parse() {
-                        cfg.output.ruleset_interval = v;
+                        self.output.ruleset_interval = v;
                     }
                     i += 2;
                 }
                 "--images" if i + 1 < args.len() => {
                     if let Ok(v) = args[i + 1].parse() {
-                        cfg.output.image_interval = v;
+                        self.output.image_interval = v;
                     }
                     i += 2;
                 }
                 "--seed" if i + 1 < args.len() => {
                     if let Ok(v) = args[i + 1].parse() {
-                        cfg.output.seed_count = v;
+                        self.output.seed_count = v;
                     }
                     i += 2;
                 }
                 "--output" if i + 1 < args.len() => {
-                    cfg.output.output_dir = args[i + 1].clone();
+                    self.output.output_dir = args[i + 1].clone();
                     i += 2;
                 }
                 _ => {
@@ -1175,8 +1196,7 @@ impl Config {
                 }
             }
         }
-
-        cfg
+        Ok(())
     }
 }
 
@@ -1574,5 +1594,64 @@ mod tests {
         assert_eq!(cfg.simulation.hgt_radius, 2);
         assert_eq!(cfg.simulation.hgt_base_rate, 0.5);
         assert_eq!(cfg.simulation.hgt_max_events_per_tick, 7);
+    }
+
+    #[test]
+    fn rng_seed_deserializes_from_toml() {
+        let cfg: Config = toml::from_str(
+            r#"
+            [simulation]
+            rng_seed = 12345
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(cfg.simulation.rng_seed, Some(12345));
+        assert_eq!(SimulationConfig::default().rng_seed, None);
+    }
+
+    #[test]
+    fn rng_seed_cli_override_sets_simulation_seed() {
+        let mut cfg = Config::default();
+        cfg.simulation.rng_seed = Some(111);
+        cfg.output.seed_count = 3;
+
+        let args = vec![
+            "marl-engine".to_string(),
+            "--seed".to_string(),
+            "7".to_string(),
+            "--rng-seed".to_string(),
+            "222".to_string(),
+        ];
+        cfg.apply_cli_overrides(&args).unwrap();
+
+        assert_eq!(cfg.output.seed_count, 7);
+        assert_eq!(cfg.simulation.rng_seed, Some(222));
+    }
+
+    #[test]
+    fn rng_seed_cli_override_rejects_bad_input() {
+        let mut cfg = Config::default();
+        let args = vec![
+            "marl-engine".to_string(),
+            "--rng-seed".to_string(),
+            "not-a-number".to_string(),
+        ];
+
+        let err = cfg.apply_cli_overrides(&args).unwrap_err();
+
+        assert!(err.contains("--rng-seed requires a u64 value"));
+        assert_eq!(cfg.simulation.rng_seed, None);
+    }
+
+    #[test]
+    fn rng_seed_cli_override_requires_value() {
+        let mut cfg = Config::default();
+        let args = vec!["marl-engine".to_string(), "--rng-seed".to_string()];
+
+        let err = cfg.apply_cli_overrides(&args).unwrap_err();
+
+        assert_eq!(err, "--rng-seed requires a u64 value");
+        assert_eq!(cfg.simulation.rng_seed, None);
     }
 }

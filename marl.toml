@@ -11,6 +11,9 @@ z = 64
 dx = 0.0001                     # 100 um voxel size
 dt = 1.0                        # 1 tick = 1 day
 diffusion_substeps = 10
+# Optional deterministic RNG seed for reproducible runs. Omitted by default;
+# entropy-derived seeds and the run RNG algorithm are recorded in summary.md.
+# rng_seed = 12345
 
 # External species indices:
 #   0 free_energy, 1 oxidant, 2 reductant, 3 carbon, 4 organic,

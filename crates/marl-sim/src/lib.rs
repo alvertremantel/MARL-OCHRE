@@ -26,9 +26,12 @@ use crate::starter_metabolisms::{make_anaerobe, make_chemolithotroph, make_photo
 use crate::stats::{print_stats, print_z_profile};
 
 use marl_cell::hgt::transfer_reaction;
-use rand::Rng;
+use rand::{Rng, SeedableRng};
+use rand_chacha::ChaCha12Rng;
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
+
+const RUN_RNG_ALGORITHM: &str = "chacha12";
 
 fn cadence_due(tick: u32, max_ticks: u32, interval: u32) -> bool {
     tick + 1 == max_ticks || (interval > 0 && tick.is_multiple_of(interval))
@@ -161,7 +164,7 @@ pub fn run(cfg: Config, _use_gpu_diffusion: bool) -> Result<(), String> {
     validate_run_config(&cfg)?;
     let grid = cfg.grid;
 
-    let mut rng = rand::rng();
+    let (mut rng, rng_seed) = make_run_rng(&cfg.simulation);
 
     let mut field = Field::new(grid);
     let mut light = LightField::new(grid);
@@ -272,6 +275,7 @@ pub fn run(cfg: Config, _use_gpu_diffusion: bool) -> Result<(), String> {
     );
     println!("Seeded {} cells (photo/chemo/anaerobe)", cells.len());
     println!("Output: {}", cfg.output.output_dir);
+    println!("RNG: {RUN_RNG_ALGORITHM}, seed: {rng_seed}");
     println!(
         "Plan: {} ticks, stats every {}, snapshots every {}, images every {}",
         cfg.output.max_ticks,
@@ -681,6 +685,8 @@ pub fn run(cfg: Config, _use_gpu_diffusion: bool) -> Result<(), String> {
         total_divisions,
         total_deaths,
         sim,
+        rng_seed,
+        RUN_RNG_ALGORITHM,
     ) {
         eprintln!("Warning: failed to write summary: {}", e);
     } else {
@@ -741,6 +747,14 @@ pub fn run(cfg: Config, _use_gpu_diffusion: bool) -> Result<(), String> {
     Ok(())
 }
 
+fn make_run_rng(sim: &SimulationConfig) -> (ChaCha12Rng, u64) {
+    let seed = sim.rng_seed.unwrap_or_else(|| {
+        let mut entropy = rand::rng();
+        entropy.random::<u64>()
+    });
+    (ChaCha12Rng::seed_from_u64(seed), seed)
+}
+
 fn record_diffusion_losses(
     before: [f32; S_EXT],
     after: [f32; S_EXT],
@@ -769,13 +783,16 @@ fn record_diffusion_losses(
 #[cfg(test)]
 mod tests {
     use super::{
-        cadence_due, hgt_accept_probability, hgt_due, run, run_hgt_phase, validate_run_config,
+        cadence_due, hgt_accept_probability, hgt_due, make_run_rng, run, run_hgt_phase,
+        validate_run_config,
     };
     use crate::starter_metabolisms::{make_chemolithotroph, make_phototroph};
     use marl_config::stoich::StoichEnforcement;
     use marl_config::{Config, GridDims, SimulationConfig};
+    use rand::Rng;
     use rand::SeedableRng;
     use rand::rngs::StdRng;
+    use rand_chacha::ChaCha12Rng;
     use std::collections::HashMap;
     use std::fs;
     use std::path::PathBuf;
@@ -792,6 +809,41 @@ mod tests {
         dir.to_string_lossy().into_owned()
     }
 
+    fn replay_smoke_config(output_dir: String, rng_seed: Option<u64>) -> Config {
+        let mut cfg = Config::default();
+        cfg.grid = GridDims { x: 8, y: 8, z: 4 };
+        cfg.simulation.rng_seed = rng_seed;
+        cfg.simulation.diffusion_substeps = 1;
+        cfg.simulation.seed_margin = 1;
+        cfg.simulation.phototroph_z_lo = 0.0;
+        cfg.simulation.phototroph_z_hi = 1.0;
+        cfg.simulation.chemolithotroph_z_lo = 1.0;
+        cfg.simulation.chemolithotroph_z_hi = 3.0;
+        cfg.simulation.anaerobe_z_lo = 2.0;
+        cfg.simulation.anaerobe_z_hi = 3.0;
+        cfg.simulation.boundary_prime_layers = 1;
+        cfg.output.max_ticks = 3;
+        cfg.output.stats_interval = 3;
+        cfg.output.snapshot_interval = 3;
+        cfg.output.ruleset_interval = 3;
+        cfg.output.image_interval = 0;
+        cfg.output.seed_count = 1;
+        cfg.output.output_dir = output_dir;
+        cfg.output.write_tick_log = true;
+        cfg.output.write_binary_field = false;
+        cfg.output.write_binary_cells = true;
+        cfg
+    }
+
+    fn summary_rng_seed(summary: &str) -> u64 {
+        summary
+            .lines()
+            .find_map(|line| line.strip_prefix("- RNG seed: "))
+            .expect("summary includes RNG seed")
+            .parse()
+            .expect("summary RNG seed is u64")
+    }
+
     #[test]
     fn zero_interval_disables_periodic_cadence_but_keeps_final_tick() {
         assert!(!cadence_due(0, 10, 0));
@@ -804,6 +856,75 @@ mod tests {
         assert!(cadence_due(5, 10, 5));
         assert!(!cadence_due(6, 10, 5));
         assert!(cadence_due(9, 10, 5));
+    }
+
+    #[test]
+    fn configured_rng_seed_reproduces_random_sequence() {
+        let seeded = SimulationConfig {
+            rng_seed: Some(12345),
+            ..SimulationConfig::default()
+        };
+        let other_seed = SimulationConfig {
+            rng_seed: Some(54321),
+            ..SimulationConfig::default()
+        };
+
+        let (mut rng_a, seed_a) = make_run_rng(&seeded);
+        let (mut rng_b, seed_b) = make_run_rng(&seeded);
+        let (mut rng_c, seed_c) = make_run_rng(&other_seed);
+        let sequence_a = (0..4).map(|_| rng_a.random::<u64>()).collect::<Vec<_>>();
+        let sequence_b = (0..4).map(|_| rng_b.random::<u64>()).collect::<Vec<_>>();
+        let sequence_c = (0..4).map(|_| rng_c.random::<u64>()).collect::<Vec<_>>();
+
+        assert_eq!(seed_a, 12345);
+        assert_eq!(seed_b, 12345);
+        assert_eq!(seed_c, 54321);
+        assert_eq!(sequence_a, sequence_b);
+        assert_ne!(sequence_a, sequence_c);
+    }
+
+    #[test]
+    fn entropy_rng_seed_is_resolved_and_replayable() {
+        let unseeded = SimulationConfig {
+            rng_seed: None,
+            ..SimulationConfig::default()
+        };
+
+        let (mut rng, resolved_seed) = make_run_rng(&unseeded);
+        let mut replay = ChaCha12Rng::seed_from_u64(resolved_seed);
+
+        let sequence = (0..4).map(|_| rng.random::<u64>()).collect::<Vec<_>>();
+        let replay_sequence = (0..4).map(|_| replay.random::<u64>()).collect::<Vec<_>>();
+
+        assert_eq!(sequence, replay_sequence);
+    }
+
+    #[test]
+    fn entropy_run_can_be_replayed_from_summary_seed() {
+        let entropy_dir = test_output_dir("marl_sim_entropy_replay_entropy");
+        let replay_dir = test_output_dir("marl_sim_entropy_replay_seeded");
+
+        run(replay_smoke_config(entropy_dir.clone(), None), false).unwrap();
+        let summary = fs::read_to_string(PathBuf::from(&entropy_dir).join("summary.md")).unwrap();
+        let seed = summary_rng_seed(&summary);
+        assert!(summary.contains("- RNG algorithm: chacha12"));
+        assert!(summary.contains(&format!("- Replay TOML: `rng_seed = {seed}`")));
+
+        run(replay_smoke_config(replay_dir.clone(), Some(seed)), false).unwrap();
+
+        let entropy_path = PathBuf::from(&entropy_dir);
+        let replay_path = PathBuf::from(&replay_dir);
+        assert_eq!(
+            fs::read(entropy_path.join("ticks.csv")).unwrap(),
+            fs::read(replay_path.join("ticks.csv")).unwrap()
+        );
+        assert_eq!(
+            fs::read(entropy_path.join("tick_2.cells.bin.zst")).unwrap(),
+            fs::read(replay_path.join("tick_2.cells.bin.zst")).unwrap()
+        );
+
+        let _ = fs::remove_dir_all(&entropy_dir);
+        let _ = fs::remove_dir_all(&replay_dir);
     }
 
     #[test]

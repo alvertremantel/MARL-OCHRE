@@ -13,6 +13,7 @@ marl-cell = { path = "../marl-cell" }
 marl-field = { path = "../marl-field" }
 marl-output = { path = "../marl-output" }
 rand.workspace = true
+rand_chacha.workspace = true
 marl-gpu = { path = "../marl-gpu", optional = true }
 
 [dev-dependencies]

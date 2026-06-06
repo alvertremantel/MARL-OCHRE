@@ -1319,6 +1319,7 @@ dependencies = [
  "marl-gpu",
  "marl-output",
  "rand",
+ "rand_chacha",
  "serde_json",
 ]
 

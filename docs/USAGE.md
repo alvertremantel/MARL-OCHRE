@@ -88,6 +88,7 @@ built-in defaults and any TOML config file:
 | `--ruleset-interval <n>` | Ruleset sidecar binary interval | 1000 |
 | `--images <n>` | PPM image snapshot interval | 500 |
 | `--seed <n>` | Cells to seed per starter metabolism | 30 |
+| `--rng-seed <n>` | Deterministic RNG seed for reproducible runs | entropy-derived, recorded with the RNG algorithm in `summary.md` |
 | `--output <dir>` | Output directory | `output/run_128x128x64` |
 | `--gpu-diffusion` | Use GPU diffusion (requires `--features gpu` at build time) | off |
 
@@ -146,6 +147,7 @@ Core physics and biology parameters:
 | `dx` | f32 | 0.0001 | Voxel size (100 µm) |
 | `dt` | f32 | 1.0 | Ticks per day |
 | `diffusion_substeps` | usize | 10 | Diffusion sub-steps per tick |
+| `rng_seed` | u64? | unset | Optional deterministic RNG seed; controls seeding, mutation, HGT, and division-placement randomness. When unset, the run derives and records a concrete entropy seed plus RNG algorithm. |
 | `d_voxel` | [f32; 12] | [0, 1.5, 1.0, …] | Diffusion coefficients per external species |
 | `lambda_decay` | [f32; 12] | [0.2, 0.01, …] | Decay rates per external species (fraction/tick); species 0 is free-energy-like and decays faster by default |
 | `source_rate_oxidant` | f32 | 0.4 | Legacy oxidant top-boundary source rate, used only when `boundary_sources` is empty |
@@ -371,6 +373,12 @@ retained fractions are gross field-pool ratios; comparison reports also compute
 control-adjusted excess pools when a comparable zero-byproduct baseline run is
 included. The baseline must have v2 event data, a chemistry snapshot, matching
 grid dimensions, and the same calibration field tick.
+For replicated calibration sweeps, keep the zero-byproduct baseline and each
+byproduct setting paired by `rng_seed` so stochastic seeding and mutation are
+controlled across the comparison.
+If `rng_seed` is omitted for exploratory work, copy the resolved seed from
+`summary.md` into follow-up configs before comparing variants, and keep the
+recorded RNG algorithm with the run notes.
 
 By default, analysis reads the full `ticks.csv` trajectory and samples the
 first, middle, and latest binary snapshots. Use `--all-snapshots`,

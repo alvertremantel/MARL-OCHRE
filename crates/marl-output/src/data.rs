@@ -690,6 +690,8 @@ impl DataLogger {
         total_divisions: u64,
         total_deaths: u64,
         sim: &SimulationConfig,
+        rng_seed: u64,
+        rng_algorithm: &str,
     ) -> Result<()> {
         let path = self.output_dir.join("summary.md");
         let file = File::create(&path)?;
@@ -728,6 +730,9 @@ impl DataLogger {
             grid.x, grid.y, grid.z, voxel_count
         )?;
         writeln!(w, "- Ticks: {}", total_ticks)?;
+        writeln!(w, "- RNG algorithm: {rng_algorithm}")?;
+        writeln!(w, "- RNG seed: {rng_seed}")?;
+        writeln!(w, "- Replay TOML: `rng_seed = {rng_seed}`")?;
         writeln!(
             w,
             "- Runtime: {:.1}s ({:.2} ticks/sec)",

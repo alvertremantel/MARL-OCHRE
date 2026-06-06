@@ -133,6 +133,13 @@ model stable.
   fractions were about 0.325, 0.534, and 0.385 for low/default/high byproduct
   strengths, respectively, so the current default remains plausible but not
   settled.
+- Reproducible experiments: `rng_seed` can now be set in `[simulation]`, or via
+  `--rng-seed`, to make seeding, mutation, HGT, and division-placement
+  randomness deterministic under the recorded run RNG algorithm. Unset seeds are
+  resolved from entropy and recorded as concrete replay seeds in `summary.md`.
+  Smoke runs confirmed identical tick logs, stoichiometry event logs, and final
+  cell binaries for repeated same-seed runs, with different hashes for a
+  neighboring seed.
 
 The next implementation target is replicated byproduct calibration experiments:
 run longer controlled sweeps with zero-byproduct baselines, quantify when routed
