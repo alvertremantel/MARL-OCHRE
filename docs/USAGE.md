@@ -376,6 +376,11 @@ grid dimensions, and the same calibration field tick.
 For replicated calibration sweeps, keep the zero-byproduct baseline and each
 byproduct setting paired by `rng_seed` so stochastic seeding and mutation are
 controlled across the comparison.
+When a comparison includes multiple zero-byproduct baselines, `marl-analyze`
+pairs each byproduct run with the baseline that has the same recorded
+`rng_seed`; legacy comparisons with one baseline still use that single control
+only when seed metadata is missing on one side. Runs with explicit mismatched
+seeds are skipped for excess-pool adjustment and reported as warnings.
 If `rng_seed` is omitted for exploratory work, copy the resolved seed from
 `summary.md` into follow-up configs before comparing variants, and keep the
 recorded RNG algorithm with the run notes.

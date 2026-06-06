@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::f64::consts::E;
 use std::fs;
@@ -44,6 +44,7 @@ impl Default for AnalysisConfig {
 pub struct RunAnalysis {
     pub run_dir: PathBuf,
     pub grid: [u32; 3],
+    pub rng_seed: Option<u64>,
     pub available_ticks: Vec<u64>,
     pub sampled_ticks: Vec<u64>,
     pub trajectory: Option<TrajectorySummary>,
@@ -71,6 +72,7 @@ pub struct ComparisonAnalysis {
 pub struct RunComparisonEntry {
     pub name: String,
     pub run_dir: PathBuf,
+    pub rng_seed: Option<u64>,
     pub final_population: Option<u64>,
     pub max_population: Option<u64>,
     pub growth_factor: Option<f64>,
@@ -549,6 +551,7 @@ pub fn analyze_run(run_dir: impl AsRef<Path>, cfg: &AnalysisConfig) -> AnalysisR
     let mut analysis = RunAnalysis {
         run_dir: run_dir.to_path_buf(),
         grid: [meta.grid_x, meta.grid_y, meta.grid_z],
+        rng_seed: read_run_rng_seed(run_dir),
         available_ticks,
         sampled_ticks,
         trajectory,
@@ -878,8 +881,11 @@ pub fn render_comparison_terminal(analysis: &ComparisonAnalysis) -> String {
     out.push_str("MARL run comparison\n");
     for run in &analysis.runs {
         out.push_str(&format!(
-            "  {}: final_pop={:?}, growth={:?}, top={:?}, dominant_genotype={:?}, active_transporters={:?}, byproduct={}, gross_retained={}, excess_retained={}, leakage_heat={}\n",
+            "  {}: rng_seed={}, final_pop={:?}, growth={:?}, top={:?}, dominant_genotype={:?}, active_transporters={:?}, byproduct={}, gross_retained={}, excess_retained={}, leakage_heat={}\n",
             run.name,
+            run.rng_seed
+                .map(|seed| seed.to_string())
+                .unwrap_or_else(|| "n/a".to_string()),
             run.final_population,
             run.growth_factor.map(|v| format!("{v:.2}x")),
             run.top_fraction.map(|v| format!("{:.1}%", v * 100.0)),
@@ -1263,12 +1269,15 @@ pub fn render_run_markdown(analysis: &RunAnalysis) -> String {
 pub fn render_comparison_markdown(analysis: &ComparisonAnalysis) -> String {
     let mut out = String::new();
     out.push_str("# MARL Run Comparison\n\n");
-    out.push_str("| run | final_pop | max_pop | growth | final_energy | top% | mid% | deep% | unique_genotypes | dominant_genotype% | active_transporters/cell | gated_slots |\n");
-    out.push_str("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n");
+    out.push_str("| run | rng_seed | final_pop | max_pop | growth | final_energy | top% | mid% | deep% | unique_genotypes | dominant_genotype% | active_transporters/cell | gated_slots |\n");
+    out.push_str("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n");
     for run in &analysis.runs {
         out.push_str(&format!(
-            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
             run.name,
+            run.rng_seed
+                .map(|seed| seed.to_string())
+                .unwrap_or_else(|| "n/a".to_string()),
             display_opt_u64(run.final_population),
             display_opt_u64(run.max_population),
             display_opt_f64(run.growth_factor),
@@ -1653,30 +1662,94 @@ fn apply_byproduct_baseline_adjustment(
     let mut warnings = Vec::new();
     let baseline_candidates = analyses
         .iter()
-        .zip(runs.iter())
-        .filter(|(analysis, run)| {
-            run.reaction_byproduct_amount == Some(0.0) && analysis.chemistry.last().is_some()
+        .filter(|analysis| {
+            analysis
+                .stoich_v2
+                .as_ref()
+                .filter(|stoich| stoich.events_present)
+                .is_some_and(|stoich| stoich.reaction_byproduct_amount == 0.0)
+                && analysis.chemistry.last().is_some()
         })
         .collect::<Vec<_>>();
-    let Some((baseline_analysis, _)) = baseline_candidates.first().copied() else {
+    if baseline_candidates.is_empty() {
         return warnings;
-    };
-    if baseline_candidates.len() > 1 {
-        warnings.push(format!(
-            "byproduct excess baseline: using {} as the first zero-byproduct baseline; {} additional baseline candidates ignored",
-            run_name(&baseline_analysis.run_dir),
-            baseline_candidates.len() - 1
-        ));
     }
-    let Some(baseline_chemistry) = baseline_analysis.chemistry.last() else {
-        return warnings;
-    };
+
+    let mut baselines_by_seed: HashMap<u64, &RunAnalysis> = HashMap::new();
+    let mut ambiguous_baseline_seeds = HashSet::new();
+    for baseline_analysis in &baseline_candidates {
+        let Some(seed) = baseline_analysis.rng_seed else {
+            if baseline_candidates.len() > 1 {
+                warnings.push(format!(
+                    "byproduct excess baseline: zero-byproduct baseline {} has no rng_seed and cannot be used for seed-paired adjustment",
+                    run_name(&baseline_analysis.run_dir)
+                ));
+            }
+            continue;
+        };
+        if ambiguous_baseline_seeds.contains(&seed) {
+            warnings.push(format!(
+                "byproduct excess baseline: additional duplicate zero-byproduct baseline {} for rng_seed {seed} is ignored because that seed is already ambiguous",
+                run_name(&baseline_analysis.run_dir)
+            ));
+        } else if let Some(previous) = baselines_by_seed.remove(&seed) {
+            ambiguous_baseline_seeds.insert(seed);
+            warnings.push(format!(
+                "byproduct excess baseline: duplicate zero-byproduct baselines for rng_seed {seed}; skipping seed-paired adjustment for this seed because {} and {} are ambiguous",
+                run_name(&previous.run_dir),
+                run_name(&baseline_analysis.run_dir)
+            ));
+        } else {
+            baselines_by_seed.insert(seed, *baseline_analysis);
+        }
+    }
 
     for (analysis, run) in analyses.iter().zip(runs.iter_mut()) {
         let Some(calibration) = &analysis.byproduct_calibration else {
             continue;
         };
         let Some(produced) = run.reaction_byproduct_amount.filter(|amount| *amount > 0.0) else {
+            continue;
+        };
+        let baseline_analysis = if let Some(seed) = analysis.rng_seed {
+            if ambiguous_baseline_seeds.contains(&seed) {
+                warnings.push(format!(
+                    "{}: byproduct excess baseline skipped because rng_seed {seed} has multiple zero-byproduct baselines",
+                    run.name
+                ));
+                continue;
+            }
+            match baselines_by_seed.get(&seed).copied() {
+                Some(baseline) => baseline,
+                None if baseline_candidates.len() == 1 => {
+                    let baseline = baseline_candidates[0];
+                    if let Some(baseline_seed) = baseline.rng_seed {
+                        warnings.push(format!(
+                            "{}: byproduct excess baseline skipped because run rng_seed {seed} does not match the only zero-byproduct baseline rng_seed {baseline_seed}",
+                            run.name
+                        ));
+                        continue;
+                    }
+                    baseline
+                }
+                None => {
+                    warnings.push(format!(
+                        "{}: byproduct excess baseline skipped because no zero-byproduct baseline with rng_seed {seed} was found",
+                        run.name
+                    ));
+                    continue;
+                }
+            }
+        } else if baseline_candidates.len() == 1 {
+            baseline_candidates[0]
+        } else {
+            warnings.push(format!(
+                "{}: byproduct excess baseline skipped because run has no rng_seed and multiple zero-byproduct baselines are available",
+                run.name
+            ));
+            continue;
+        };
+        let Some(baseline_chemistry) = baseline_analysis.chemistry.last() else {
             continue;
         };
         if analysis.grid != baseline_analysis.grid {
@@ -1717,6 +1790,14 @@ fn apply_byproduct_baseline_adjustment(
         }
     }
     warnings
+}
+
+fn read_run_rng_seed(run_dir: &Path) -> Option<u64> {
+    let summary = fs::read_to_string(run_dir.join("summary.md")).ok()?;
+    summary
+        .lines()
+        .find_map(|line| line.strip_prefix("- RNG seed: "))
+        .and_then(|value| value.trim().parse().ok())
 }
 
 fn read_ticks_csv(run_dir: &Path) -> AnalysisResult<Vec<TickRow>> {
@@ -2782,6 +2863,7 @@ impl RunComparisonEntry {
         Self {
             name: run_name(&analysis.run_dir),
             run_dir: analysis.run_dir.clone(),
+            rng_seed: analysis.rng_seed,
             final_population: analysis
                 .trajectory
                 .as_ref()
@@ -2942,12 +3024,46 @@ fn display_opt_pct(value: Option<f64>) -> String {
 mod tests {
     use super::*;
 
+    fn test_dir(name: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("{name}_{}_{}", std::process::id(), nanos));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
     #[test]
     fn sampled_ticks_choose_first_middle_last() {
         assert_eq!(sample_ticks(&[]), Vec::<u64>::new());
         assert_eq!(sample_ticks(&[10]), vec![10]);
         assert_eq!(sample_ticks(&[0, 80, 159]), vec![0, 80, 159]);
         assert_eq!(sample_ticks(&[0, 10, 20, 30]), vec![0, 20, 30]);
+    }
+
+    #[test]
+    fn run_rng_seed_parser_reads_summary_metadata() {
+        let valid = test_dir("marl_analysis_seed_valid");
+        fs::write(
+            valid.join("summary.md"),
+            "# Run Summary\n\n- RNG algorithm: chacha12\n- RNG seed: 41001\n",
+        )
+        .unwrap();
+        assert_eq!(read_run_rng_seed(&valid), Some(41001));
+
+        let malformed = test_dir("marl_analysis_seed_malformed");
+        fs::write(malformed.join("summary.md"), "- RNG seed: nope\n").unwrap();
+        assert_eq!(read_run_rng_seed(&malformed), None);
+
+        let missing = test_dir("marl_analysis_seed_missing");
+        fs::write(missing.join("summary.md"), "- Ticks: 10\n").unwrap();
+        assert_eq!(read_run_rng_seed(&missing), None);
+
+        let _ = fs::remove_dir_all(&valid);
+        let _ = fs::remove_dir_all(&malformed);
+        let _ = fs::remove_dir_all(&missing);
     }
 
     #[test]
@@ -3316,6 +3432,7 @@ mod tests {
         let analysis = RunAnalysis {
             run_dir: PathBuf::from("/tmp/example_run"),
             grid: [1, 1, 1],
+            rng_seed: None,
             available_ticks: vec![0, 10],
             sampled_ticks: vec![0, 10],
             trajectory: None,
@@ -3345,6 +3462,7 @@ mod tests {
         let run = |name: &str, byproduct: Option<f64>| RunComparisonEntry {
             name: name.to_string(),
             run_dir: PathBuf::from(format!("/tmp/{name}")),
+            rng_seed: None,
             final_population: Some(10),
             max_population: Some(12),
             growth_factor: Some(1.2),
@@ -3386,6 +3504,9 @@ mod tests {
         assert!(terminal.contains("byproduct=n/a"));
         assert!(markdown.contains("## Stoichiometry V2 Comparison"));
         assert!(markdown.contains(
+            "| with_events | n/a | 10 | 12 | 1.200 | 0.500 | 40.0 | 50.0 | 10.0 | n/a | n/a | n/a | n/a |"
+        ));
+        assert!(markdown.contains(
             "| with_events | 100 | 3 | 7 | 2.500 | 0.625 | 0.250 | 0.500 | 0.200 | 1 | 0 | 11 | 1.250 |"
         ));
         assert!(markdown.contains(
@@ -3417,6 +3538,7 @@ mod tests {
         RunAnalysis {
             run_dir: PathBuf::from(format!("/tmp/{name}")),
             grid: [1, 1, 1],
+            rng_seed: None,
             available_ticks: Vec::new(),
             sampled_ticks: Vec::new(),
             trajectory: None,
@@ -3431,6 +3553,87 @@ mod tests {
             byproduct_calibration,
             findings: Vec::new(),
             warnings: Vec::new(),
+        }
+    }
+
+    fn seeded(mut analysis: RunAnalysis, seed: u64) -> RunAnalysis {
+        analysis.rng_seed = Some(seed);
+        analysis
+    }
+
+    fn zero_byproduct_stoich() -> StoichV2Analysis {
+        StoichV2Analysis {
+            summary_present: false,
+            events_present: true,
+            total_ticks: None,
+            enforcement: None,
+            gross_residual_abs_sum: None,
+            total_events: 1,
+            imbalanced_events: 0,
+            reaction_byproduct_events: 0,
+            reaction_byproduct_amount: 0.0,
+            reaction_byproduct_model_abs: 0.0,
+            reaction_byproduct_residual_abs: 0.0,
+            reaction_byproduct_by_species: Vec::new(),
+            reaction_leakage_events: 0,
+            reaction_leakage_amount: 0.0,
+            reaction_leakage_energy_to_heat: 0.0,
+        }
+    }
+
+    fn byproduct_stoich(species_index: i16, amount: f64) -> StoichV2Analysis {
+        StoichV2Analysis {
+            summary_present: false,
+            events_present: true,
+            total_ticks: None,
+            enforcement: None,
+            gross_residual_abs_sum: None,
+            total_events: 1,
+            imbalanced_events: 0,
+            reaction_byproduct_events: 1,
+            reaction_byproduct_amount: amount,
+            reaction_byproduct_model_abs: 0.0,
+            reaction_byproduct_residual_abs: 0.0,
+            reaction_byproduct_by_species: vec![StoichSpeciesEventSummary {
+                species_index,
+                amount,
+                events: 1,
+            }],
+            reaction_leakage_events: 0,
+            reaction_leakage_amount: 0.0,
+            reaction_leakage_energy_to_heat: 0.0,
+        }
+    }
+
+    fn byproduct_calibration(
+        species_index: i16,
+        final_field_total: f64,
+        produced_amount: f64,
+    ) -> ByproductCalibrationSummary {
+        ByproductCalibrationSummary {
+            total_byproduct_amount: produced_amount,
+            final_byproduct_pool: Some(final_field_total),
+            retained_fraction: Some(final_field_total / produced_amount),
+            field_tick: Some(10),
+            ruleset_tick: None,
+            missing_field_species: 0,
+            cross_feeding_candidates: 0,
+            public_pool_candidates: 0,
+            species: vec![ByproductSpeciesCalibration {
+                species_index,
+                name: external_species_descriptor(species_index as usize)
+                    .name
+                    .to_string(),
+                role: "carbon_source".to_string(),
+                produced_amount,
+                final_field_total: Some(final_field_total),
+                retained_fraction: Some(final_field_total / produced_amount),
+                uptake_active_slots: 0,
+                secretion_active_slots: 0,
+                uptake_rate_sum: 0.0,
+                secretion_rate_sum: 0.0,
+                interpretation: "accumulating_pool".to_string(),
+            }],
         }
     }
 
@@ -3540,6 +3743,219 @@ mod tests {
                 .iter()
                 .any(|finding| finding.id == "comparison_byproduct_excess_pool_candidate")
         );
+    }
+
+    #[test]
+    fn comparison_baseline_adjustment_pairs_by_rng_seed() {
+        let baseline_seed_1 = seeded(
+            minimal_analysis(
+                "baseline_s1",
+                vec![SnapshotChemistry {
+                    tick: 10,
+                    nonfinite_values: 0,
+                    negative_values: 0,
+                    oxidant_penetration_z: None,
+                    reductant_penetration_z: None,
+                    redox_overlap_layers: 0,
+                    species_profiles: vec![species_profile(4, 100.0)],
+                }],
+                Some(zero_byproduct_stoich()),
+                None,
+            ),
+            41001,
+        );
+        let baseline_seed_2 = seeded(
+            minimal_analysis(
+                "baseline_s2",
+                vec![SnapshotChemistry {
+                    tick: 10,
+                    nonfinite_values: 0,
+                    negative_values: 0,
+                    oxidant_penetration_z: None,
+                    reductant_penetration_z: None,
+                    redox_overlap_layers: 0,
+                    species_profiles: vec![species_profile(4, 200.0)],
+                }],
+                Some(zero_byproduct_stoich()),
+                None,
+            ),
+            41002,
+        );
+        let byproduct_seed_1 = seeded(
+            minimal_analysis(
+                "byproduct_s1",
+                vec![SnapshotChemistry {
+                    tick: 10,
+                    nonfinite_values: 0,
+                    negative_values: 0,
+                    oxidant_penetration_z: None,
+                    reductant_penetration_z: None,
+                    redox_overlap_layers: 0,
+                    species_profiles: vec![species_profile(4, 112.0)],
+                }],
+                Some(byproduct_stoich(4, 20.0)),
+                Some(byproduct_calibration(4, 112.0, 20.0)),
+            ),
+            41001,
+        );
+        let byproduct_seed_2 = seeded(
+            minimal_analysis(
+                "byproduct_s2",
+                vec![SnapshotChemistry {
+                    tick: 10,
+                    nonfinite_values: 0,
+                    negative_values: 0,
+                    oxidant_penetration_z: None,
+                    reductant_penetration_z: None,
+                    redox_overlap_layers: 0,
+                    species_profiles: vec![species_profile(4, 215.0)],
+                }],
+                Some(byproduct_stoich(4, 20.0)),
+                Some(byproduct_calibration(4, 215.0, 20.0)),
+            ),
+            41002,
+        );
+        let analyses = vec![
+            baseline_seed_1,
+            baseline_seed_2,
+            byproduct_seed_1,
+            byproduct_seed_2,
+        ];
+        let mut runs = analyses
+            .iter()
+            .map(RunComparisonEntry::from_analysis)
+            .collect::<Vec<_>>();
+
+        let warnings = apply_byproduct_baseline_adjustment(&analyses, &mut runs);
+
+        assert!(warnings.is_empty());
+        assert_eq!(runs[2].byproduct_excess_final_pool, Some(12.0));
+        assert_eq!(runs[2].byproduct_excess_retained_fraction, Some(0.6));
+        assert_eq!(runs[3].byproduct_excess_final_pool, Some(15.0));
+        assert_eq!(runs[3].byproduct_excess_retained_fraction, Some(0.75));
+    }
+
+    #[test]
+    fn comparison_baseline_adjustment_rejects_mismatched_explicit_seed() {
+        let baseline = seeded(
+            minimal_analysis(
+                "baseline_s1",
+                vec![SnapshotChemistry {
+                    tick: 10,
+                    nonfinite_values: 0,
+                    negative_values: 0,
+                    oxidant_penetration_z: None,
+                    reductant_penetration_z: None,
+                    redox_overlap_layers: 0,
+                    species_profiles: vec![species_profile(4, 100.0)],
+                }],
+                Some(zero_byproduct_stoich()),
+                None,
+            ),
+            41001,
+        );
+        let byproduct = seeded(
+            minimal_analysis(
+                "byproduct_s2",
+                vec![SnapshotChemistry {
+                    tick: 10,
+                    nonfinite_values: 0,
+                    negative_values: 0,
+                    oxidant_penetration_z: None,
+                    reductant_penetration_z: None,
+                    redox_overlap_layers: 0,
+                    species_profiles: vec![species_profile(4, 112.0)],
+                }],
+                Some(byproduct_stoich(4, 20.0)),
+                Some(byproduct_calibration(4, 112.0, 20.0)),
+            ),
+            41002,
+        );
+        let analyses = vec![baseline, byproduct];
+        let mut runs = analyses
+            .iter()
+            .map(RunComparisonEntry::from_analysis)
+            .collect::<Vec<_>>();
+
+        let warnings = apply_byproduct_baseline_adjustment(&analyses, &mut runs);
+
+        assert!(warnings.iter().any(|warning| {
+            warning.contains("run rng_seed 41002") && warning.contains("baseline rng_seed 41001")
+        }));
+        assert_eq!(runs[1].byproduct_excess_final_pool, None);
+        assert_eq!(runs[1].byproduct_excess_retained_fraction, None);
+    }
+
+    #[test]
+    fn comparison_baseline_adjustment_skips_duplicate_seed_baselines() {
+        let baseline_a = seeded(
+            minimal_analysis(
+                "baseline_a",
+                vec![SnapshotChemistry {
+                    tick: 10,
+                    nonfinite_values: 0,
+                    negative_values: 0,
+                    oxidant_penetration_z: None,
+                    reductant_penetration_z: None,
+                    redox_overlap_layers: 0,
+                    species_profiles: vec![species_profile(4, 100.0)],
+                }],
+                Some(zero_byproduct_stoich()),
+                None,
+            ),
+            41001,
+        );
+        let baseline_b = seeded(
+            minimal_analysis(
+                "baseline_b",
+                vec![SnapshotChemistry {
+                    tick: 10,
+                    nonfinite_values: 0,
+                    negative_values: 0,
+                    oxidant_penetration_z: None,
+                    reductant_penetration_z: None,
+                    redox_overlap_layers: 0,
+                    species_profiles: vec![species_profile(4, 105.0)],
+                }],
+                Some(zero_byproduct_stoich()),
+                None,
+            ),
+            41001,
+        );
+        let byproduct = seeded(
+            minimal_analysis(
+                "byproduct_s1",
+                vec![SnapshotChemistry {
+                    tick: 10,
+                    nonfinite_values: 0,
+                    negative_values: 0,
+                    oxidant_penetration_z: None,
+                    reductant_penetration_z: None,
+                    redox_overlap_layers: 0,
+                    species_profiles: vec![species_profile(4, 112.0)],
+                }],
+                Some(byproduct_stoich(4, 20.0)),
+                Some(byproduct_calibration(4, 112.0, 20.0)),
+            ),
+            41001,
+        );
+        let analyses = vec![baseline_a, baseline_b, byproduct];
+        let mut runs = analyses
+            .iter()
+            .map(RunComparisonEntry::from_analysis)
+            .collect::<Vec<_>>();
+
+        let warnings = apply_byproduct_baseline_adjustment(&analyses, &mut runs);
+
+        assert!(warnings.iter().any(|warning| {
+            warning.contains("duplicate zero-byproduct baselines for rng_seed 41001")
+        }));
+        assert!(warnings.iter().any(|warning| {
+            warning.contains("byproduct_s1")
+                && warning.contains("multiple zero-byproduct baselines")
+        }));
+        assert_eq!(runs[2].byproduct_excess_final_pool, None);
+        assert_eq!(runs[2].byproduct_excess_retained_fraction, None);
     }
 
     #[test]
@@ -3716,6 +4132,7 @@ mod tests {
         let analysis = RunAnalysis {
             run_dir: PathBuf::from("/tmp/example_run"),
             grid: [1, 1, 1],
+            rng_seed: None,
             available_ticks: Vec::new(),
             sampled_ticks: Vec::new(),
             trajectory: None,
@@ -3837,6 +4254,7 @@ mod tests {
         let analysis = RunAnalysis {
             run_dir: PathBuf::from("/tmp/example_run"),
             grid: [1, 1, 1],
+            rng_seed: None,
             available_ticks: Vec::new(),
             sampled_ticks: Vec::new(),
             trajectory: None,
@@ -3910,6 +4328,7 @@ mod tests {
         let analysis = RunAnalysis {
             run_dir: summary_only_dir.clone(),
             grid: [1, 1, 1],
+            rng_seed: None,
             available_ticks: Vec::new(),
             sampled_ticks: Vec::new(),
             trajectory: None,
@@ -3968,6 +4387,7 @@ mod tests {
         let analysis = RunAnalysis {
             run_dir: PathBuf::from("/tmp/example_run"),
             grid: [1, 1, 1],
+            rng_seed: None,
             available_ticks: Vec::new(),
             sampled_ticks: Vec::new(),
             trajectory: None,

@@ -140,6 +140,10 @@ model stable.
   Smoke runs confirmed identical tick logs, stoichiometry event logs, and final
   cell binaries for repeated same-seed runs, with different hashes for a
   neighboring seed.
+- Replicated comparison support: `marl-analyze compare` now carries recorded
+  `rng_seed` metadata into reports and, when multiple zero-byproduct controls
+  are present, applies byproduct excess-pool adjustments against the matching
+  same-seed baseline instead of the first control run.
 
 The next implementation target is replicated byproduct calibration experiments:
 run longer controlled sweeps with zero-byproduct baselines, quantify when routed
