@@ -146,11 +146,12 @@ Core physics and biology parameters:
 | `dx` | f32 | 0.0001 | Voxel size (100 µm) |
 | `dt` | f32 | 1.0 | Ticks per day |
 | `diffusion_substeps` | usize | 10 | Diffusion sub-steps per tick |
-| `d_voxel` | [f32; 12] | [0, 1.5, 1.0, …] | Diffusion coefficients per species |
-| `lambda_decay` | [f32; 12] | [0, 0.01, …] | Decay rates per species (fraction/tick) |
-| `source_rate_oxidant` | f32 | 0.4 | Oxidant boundary source rate |
-| `source_rate_carbon` | f32 | 0.15 | Carbon boundary source rate |
-| `source_rate_reductant` | f32 | 0.5 | Reductant boundary source rate |
+| `d_voxel` | [f32; 12] | [0, 1.5, 1.0, …] | Diffusion coefficients per external species |
+| `lambda_decay` | [f32; 12] | [0.2, 0.01, …] | Decay rates per external species (fraction/tick); species 0 is free-energy-like and decays faster by default |
+| `source_rate_oxidant` | f32 | 0.4 | Legacy oxidant top-boundary source rate, used only when `boundary_sources` is empty |
+| `source_rate_carbon` | f32 | 0.15 | Legacy carbon top-boundary source rate, used only when `boundary_sources` is empty |
+| `source_rate_reductant` | f32 | 0.5 | Legacy reductant bottom-boundary source rate, used only when `boundary_sources` is empty |
+| `boundary_sources` | list | [] | Optional explicit source list: `{ species, face = "top"/"bottom", rate }`; replaces the legacy source-rate fields when non-empty |
 | `epsilon` | f32 | 0.001 | Small background reaction rate |
 | `c_max` | f32 | 10.0 | Saturation ceiling for transporter kinetics |
 | `lambda_maintenance` | f32 | 0.12 | Base maintenance cost per tick |
@@ -208,10 +209,41 @@ Core physics and biology parameters:
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `boundary_prime_layers` | usize | 2 | Number of z-layers to prime at boundaries |
-| `boundary_prime_oxidant` | f32 | 0.5 | Initial oxidant concentration in primed layers |
-| `boundary_prime_carbon` | f32 | 0.3 | Initial carbon concentration in primed layers |
-| `boundary_prime_reductant` | f32 | 0.5 | Initial reductant concentration in primed layers |
+| `boundary_prime_oxidant` | f32 | 0.5 | Legacy initial oxidant concentration in top primed layers, used only when `boundary_primes` is empty |
+| `boundary_prime_carbon` | f32 | 0.3 | Legacy initial carbon concentration in top primed layers, used only when `boundary_primes` is empty |
+| `boundary_prime_reductant` | f32 | 0.5 | Legacy initial reductant concentration in bottom primed layers, used only when `boundary_primes` is empty |
+| `boundary_primes` | list | [] | Optional explicit boundary priming list: `{ species, face = "top"/"bottom", concentration }`; replaces the legacy prime fields when non-empty |
 | `stoich_enforcement` | enum | `"off"` | `"off"`, `"audit"`, or `"strict"` full-system stoichiometry policy |
+
+External species indices are currently interpreted as:
+
+| Index | Name | Notes |
+|---:|---|---|
+| 0 | `free_energy` | Extracellular energy-like pool; can evolve through transport/effectors and decays at `0.2` by default |
+| 1 | `oxidant` | Default top source |
+| 2 | `reductant` | Default bottom source |
+| 3 | `carbon` | Default top source |
+| 4 | `organic` | Organic waste / absorber |
+| 5-6 | `signal_a`, `signal_b` | Reserved signal channels |
+| 7 | `structural` | Structural deposit that slows local diffusion |
+| 8-11 | `spare_*` | Open chemistry capacity |
+
+Example explicit boundary chemistry:
+
+```toml
+[simulation]
+boundary_sources = [
+  { species = 1, face = "top", rate = 0.4 },
+  { species = 3, face = "top", rate = 0.15 },
+  { species = 2, face = "bottom", rate = 0.5 },
+]
+
+boundary_primes = [
+  { species = 1, face = "top", concentration = 0.5 },
+  { species = 3, face = "top", concentration = 0.3 },
+  { species = 2, face = "bottom", concentration = 0.5 },
+]
+```
 
 ### `[grid]` section
 

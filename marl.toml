@@ -12,15 +12,26 @@ dx = 0.0001                     # 100 um voxel size
 dt = 1.0                        # 1 tick = 1 day
 diffusion_substeps = 10
 
+# External species indices:
+#   0 free_energy, 1 oxidant, 2 reductant, 3 carbon, 4 organic,
+#   5 signal_a, 6 signal_b, 7 structural, 8-11 spare.
 # Diffusion coefficients per external species (voxels^2/tick)
 d_voxel = [0.0, 1.5, 1.0, 1.2, 0.8, 0.5, 0.5, 0.1, 0.3, 0.3, 0.3, 0.3]
 
 # Decay rates per species (fraction per tick)
-lambda_decay = [0.0, 0.01, 0.01, 0.005, 0.03, 0.05, 0.05, 0.002, 0.01, 0.01, 0.01, 0.01]
+lambda_decay = [0.2, 0.01, 0.01, 0.005, 0.03, 0.05, 0.05, 0.002, 0.01, 0.01, 0.01, 0.01]
 
 source_rate_oxidant = 0.4
 source_rate_carbon = 0.15
 source_rate_reductant = 0.5
+
+# Optional explicit boundary source list. When non-empty, this replaces the
+# legacy source_rate_* fields above.
+# boundary_sources = [
+#   { species = 1, face = "top", rate = 0.4 },
+#   { species = 3, face = "top", rate = 0.15 },
+#   { species = 2, face = "bottom", rate = 0.5 },
+# ]
 
 epsilon = 0.001
 c_max = 10.0
@@ -70,6 +81,14 @@ boundary_prime_layers = 2
 boundary_prime_oxidant = 0.5
 boundary_prime_carbon = 0.3
 boundary_prime_reductant = 0.5
+
+# Optional explicit boundary priming list. When non-empty, this replaces the
+# legacy boundary_prime_* fields above.
+# boundary_primes = [
+#   { species = 1, face = "top", concentration = 0.5 },
+#   { species = 3, face = "top", concentration = 0.3 },
+#   { species = 2, face = "bottom", concentration = 0.5 },
+# ]
 stoich_enforcement = "off"
 
 [output]

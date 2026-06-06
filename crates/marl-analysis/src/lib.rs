@@ -1886,7 +1886,7 @@ fn fraction(part: u64, total: u64) -> f64 {
 
 fn species_name(species: usize) -> &'static str {
     match species {
-        0 => "species0",
+        0 => "free_energy",
         1 => "oxidant",
         2 => "reductant",
         3 => "carbon",

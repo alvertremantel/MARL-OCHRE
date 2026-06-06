@@ -44,7 +44,7 @@ The extracellular environment is a dense 3D field stored as a flat `Vec<f32>` in
 
 Important external species in current use:
 
-- `0`: unused placeholder in the field layout
+- `0`: free-energy-like extracellular pool; not boundary-sourced by default and now decays faster than carbon
 - `1`: oxidant
 - `2`: reductant
 - `3`: carbon
@@ -53,12 +53,15 @@ Important external species in current use:
 - `7`: structural deposit that slows local diffusion
 - `8..11`: spare capacity
 
-Boundary sourcing is asymmetric by depth:
+Boundary sourcing is asymmetric by depth by default:
 
 - top surface: oxidant and carbon
 - bottom surface: reductant
 
 That asymmetry is the main environmental driver of the current ecological setup.
+The TOML config can also provide explicit `boundary_sources` and
+`boundary_primes` lists, allowing any external species to be sourced or primed
+on the top or bottom face without adding new hardcoded Rust fields.
 
 ### Cells
 
@@ -290,6 +293,7 @@ Several current simplifications matter if this code is used for serious experime
 - Bookkeeping conservation is enforced in the current cell update path: accepted uptake, secretion, reaction flux, cofactor consumption, and division splits are bounded by available pools.
 - Physical stoichiometry has two output layers. The v1 `stoich_summary.json` and `stoich_ticks.csv` files remain a legacy-reaction audit. The v2 `stoich_v2_summary.json` and `stoich_v2_events.csv` files audit accepted full-system fluxes across boundary inputs, diffusion/decay, spatial exchange, transport, reactions, maintenance, effectors, division, death, and light availability.
 - Strict stoichiometry is opt-in via `stoich_enforcement = "strict"`. Strict mode rejects unbalanced transport/effectors and active reactions that do not match a balanced template catalog, while explicit reservoirs close modeled sources and sinks without adding new species slots.
+- External species 0 is not a boundary input, but organisms can evolve to export and re-import internal energy through it. It decays by default, and headless analysis now reports when it accumulates. Treat it as a real modeled pool, not an unused spare.
 - Dead cells are removed; their internals are not lysed back into the field.
 - Quiescence is partial rather than a deep dormancy mode.
 - Cells are updated sequentially with immediate field writes inside each tick.

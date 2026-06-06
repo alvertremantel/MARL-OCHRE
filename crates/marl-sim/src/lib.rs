@@ -37,6 +37,7 @@ fn cadence_due(tick: u32, max_ticks: u32, interval: u32) -> bool {
 fn validate_run_config(cfg: &Config) -> Result<(), String> {
     cfg.grid.validate()?;
     validate_diffusion_config(&cfg.simulation)?;
+    cfg.simulation.validate_chemistry()?;
     validate_hgt_config(&cfg.simulation)
 }
 

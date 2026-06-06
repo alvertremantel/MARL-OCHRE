@@ -36,6 +36,33 @@ pub const S_RECEPTORS: usize = 8;
 pub const S_TRANSPORTERS: usize = 8;
 pub const S_EFFECTORS: usize = 8;
 
+pub const EXT_ENERGY: usize = 0;
+pub const EXT_OXIDANT: usize = 1;
+pub const EXT_REDUCTANT: usize = 2;
+pub const EXT_CARBON: usize = 3;
+pub const EXT_ORGANIC: usize = 4;
+pub const EXT_SIGNAL_A: usize = 5;
+pub const EXT_SIGNAL_B: usize = 6;
+pub const EXT_STRUCTURAL: usize = 7;
+
+pub fn external_species_name(species: usize) -> &'static str {
+    match species {
+        EXT_ENERGY => "free_energy",
+        EXT_OXIDANT => "oxidant",
+        EXT_REDUCTANT => "reductant",
+        EXT_CARBON => "carbon",
+        EXT_ORGANIC => "organic",
+        EXT_SIGNAL_A => "signal_a",
+        EXT_SIGNAL_B => "signal_b",
+        EXT_STRUCTURAL => "structural",
+        8 => "spare_0",
+        9 => "spare_1",
+        10 => "spare_2",
+        11 => "spare_3",
+        _ => "unknown",
+    }
+}
+
 // ============================================================================
 // RUNTIME CONFIGURATION — SimulationConfig + OutputConfig
 // ============================================================================
@@ -106,6 +133,72 @@ impl Default for GridDims {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BoundaryFace {
+    Top,
+    Bottom,
+}
+
+impl BoundaryFace {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Top => "top",
+            Self::Bottom => "bottom",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, serde::Deserialize)]
+pub struct BoundarySourceConfig {
+    pub species: usize,
+    pub face: BoundaryFace,
+    pub rate: f32,
+}
+
+impl BoundarySourceConfig {
+    pub fn validate(self) -> Result<(), String> {
+        if self.species >= S_EXT {
+            return Err(format!(
+                "boundary source species {} is out of range for {S_EXT} external species",
+                self.species
+            ));
+        }
+        if !self.rate.is_finite() || self.rate < 0.0 {
+            return Err(format!(
+                "boundary source species {} has invalid rate {}",
+                self.species, self.rate
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, serde::Deserialize)]
+pub struct BoundaryPrimeConfig {
+    pub species: usize,
+    pub face: BoundaryFace,
+    pub concentration: f32,
+}
+
+impl BoundaryPrimeConfig {
+    pub fn validate(self) -> Result<(), String> {
+        if self.species >= S_EXT {
+            return Err(format!(
+                "boundary prime species {} is out of range for {S_EXT} external species",
+                self.species
+            ));
+        }
+        if !self.concentration.is_finite() || self.concentration < 0.0 {
+            return Err(format!(
+                "boundary prime species {} has invalid concentration {}",
+                self.species, self.concentration
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Physics, chemistry, biology, and seeding parameters.
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(default)]
@@ -123,6 +216,7 @@ pub struct SimulationConfig {
     pub source_rate_oxidant: f32,
     pub source_rate_carbon: f32,
     pub source_rate_reductant: f32,
+    pub boundary_sources: Vec<BoundarySourceConfig>,
 
     // Cell metabolism
     pub epsilon: f32,
@@ -181,6 +275,7 @@ pub struct SimulationConfig {
     pub boundary_prime_oxidant: f32,
     pub boundary_prime_carbon: f32,
     pub boundary_prime_reductant: f32,
+    pub boundary_primes: Vec<BoundaryPrimeConfig>,
 
     // Stoichiometry accounting / enforcement
     pub stoich_enforcement: StoichEnforcement,
@@ -195,12 +290,13 @@ impl Default for SimulationConfig {
 
             d_voxel: [0.0, 1.5, 1.0, 1.2, 0.8, 0.5, 0.5, 0.1, 0.3, 0.3, 0.3, 0.3],
             lambda_decay: [
-                0.0, 0.01, 0.01, 0.005, 0.03, 0.05, 0.05, 0.002, 0.01, 0.01, 0.01, 0.01,
+                0.2, 0.01, 0.01, 0.005, 0.03, 0.05, 0.05, 0.002, 0.01, 0.01, 0.01, 0.01,
             ],
 
             source_rate_oxidant: 0.4,
             source_rate_carbon: 0.15,
             source_rate_reductant: 0.5,
+            boundary_sources: Vec::new(),
 
             epsilon: 0.001,
             c_max: 10.0,
@@ -250,9 +346,68 @@ impl Default for SimulationConfig {
             boundary_prime_oxidant: 0.5,
             boundary_prime_carbon: 0.3,
             boundary_prime_reductant: 0.5,
+            boundary_primes: Vec::new(),
 
             stoich_enforcement: StoichEnforcement::Off,
         }
+    }
+}
+
+impl SimulationConfig {
+    pub fn effective_boundary_sources(&self) -> Vec<BoundarySourceConfig> {
+        if !self.boundary_sources.is_empty() {
+            return self.boundary_sources.clone();
+        }
+        vec![
+            BoundarySourceConfig {
+                species: EXT_OXIDANT,
+                face: BoundaryFace::Top,
+                rate: self.source_rate_oxidant,
+            },
+            BoundarySourceConfig {
+                species: EXT_CARBON,
+                face: BoundaryFace::Top,
+                rate: self.source_rate_carbon,
+            },
+            BoundarySourceConfig {
+                species: EXT_REDUCTANT,
+                face: BoundaryFace::Bottom,
+                rate: self.source_rate_reductant,
+            },
+        ]
+    }
+
+    pub fn effective_boundary_primes(&self) -> Vec<BoundaryPrimeConfig> {
+        if !self.boundary_primes.is_empty() {
+            return self.boundary_primes.clone();
+        }
+        vec![
+            BoundaryPrimeConfig {
+                species: EXT_OXIDANT,
+                face: BoundaryFace::Top,
+                concentration: self.boundary_prime_oxidant,
+            },
+            BoundaryPrimeConfig {
+                species: EXT_CARBON,
+                face: BoundaryFace::Top,
+                concentration: self.boundary_prime_carbon,
+            },
+            BoundaryPrimeConfig {
+                species: EXT_REDUCTANT,
+                face: BoundaryFace::Bottom,
+                concentration: self.boundary_prime_reductant,
+            },
+        ]
+    }
+
+    pub fn validate_chemistry(&self) -> Result<(), String> {
+        for source in self.effective_boundary_sources() {
+            source.validate()?;
+        }
+        for prime in self.effective_boundary_primes() {
+            prime.validate()?;
+        }
+        Ok(())
     }
 }
 
@@ -601,6 +756,64 @@ mod tests {
         .unwrap();
 
         assert_eq!(cfg.simulation.stoich_enforcement, StoichEnforcement::Strict);
+    }
+
+    #[test]
+    fn explicit_boundary_chemistry_replaces_legacy_sources() {
+        let cfg: Config = toml::from_str(
+            r#"
+            [simulation]
+            source_rate_oxidant = 9.0
+            boundary_sources = [
+                { species = 4, face = "bottom", rate = 0.25 },
+            ]
+            boundary_primes = [
+                { species = 5, face = "top", concentration = 0.75 },
+            ]
+            "#,
+        )
+        .unwrap();
+
+        let sources = cfg.simulation.effective_boundary_sources();
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].species, EXT_ORGANIC);
+        assert_eq!(sources[0].face, BoundaryFace::Bottom);
+        assert_eq!(sources[0].rate, 0.25);
+
+        let primes = cfg.simulation.effective_boundary_primes();
+        assert_eq!(primes.len(), 1);
+        assert_eq!(primes[0].species, EXT_SIGNAL_A);
+        assert_eq!(primes[0].face, BoundaryFace::Top);
+        assert_eq!(primes[0].concentration, 0.75);
+        assert!(cfg.simulation.validate_chemistry().is_ok());
+    }
+
+    #[test]
+    fn chemistry_validation_rejects_bad_species_and_rates() {
+        let mut sim = SimulationConfig {
+            boundary_sources: vec![BoundarySourceConfig {
+                species: S_EXT,
+                face: BoundaryFace::Top,
+                rate: 0.1,
+            }],
+            ..Default::default()
+        };
+        assert!(sim.validate_chemistry().is_err());
+
+        sim.boundary_sources = vec![BoundarySourceConfig {
+            species: EXT_CARBON,
+            face: BoundaryFace::Top,
+            rate: -0.1,
+        }];
+        assert!(sim.validate_chemistry().is_err());
+
+        sim.boundary_sources.clear();
+        sim.boundary_primes = vec![BoundaryPrimeConfig {
+            species: EXT_CARBON,
+            face: BoundaryFace::Top,
+            concentration: f32::NAN,
+        }];
+        assert!(sim.validate_chemistry().is_err());
     }
 
     #[test]

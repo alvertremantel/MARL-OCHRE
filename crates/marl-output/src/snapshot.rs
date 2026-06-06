@@ -27,21 +27,7 @@ use std::path::Path;
 /// Map external species index (0..S_EXT) to a human-readable name suitable
 /// for filenames. These match the comments in config.rs.
 pub fn species_name(s: usize) -> &'static str {
-    match s {
-        0 => "light",
-        1 => "oxidant",
-        2 => "reductant",
-        3 => "carbon",
-        4 => "organic",
-        5 => "signalA",
-        6 => "signalB",
-        7 => "structural",
-        8 => "spare_0",
-        9 => "spare_1",
-        10 => "spare_2",
-        11 => "spare_3",
-        _ => "unknown",
-    }
+    external_species_name(s)
 }
 
 // ---------------------------------------------------------------------------

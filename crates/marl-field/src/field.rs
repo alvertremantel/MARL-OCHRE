@@ -382,8 +382,8 @@ impl Field {
     }
 
     /// Set boundary source terms (called once per tick before diffusion).
-    /// Oxidant + carbon sourced from top (z=0), reductant from bottom (z=max).
-    /// These are the only external inputs to the system — everything else is recycled.
+    /// These are the configured external inputs to the system; everything else
+    /// is recycled by cells.
     pub fn apply_boundary_sources(&mut self, sim: &SimulationConfig) {
         self.apply_boundary_sources_with_stoich(sim, None, false);
     }
@@ -394,33 +394,22 @@ impl Field {
         mut stoich: Option<&mut StoichTickLedger>,
         keep_events: bool,
     ) {
-        // Top face: oxidant (species 1) and carbon (species 3)
-        for y in 0..self.grid.y {
-            for x in 0..self.grid.x {
-                let ox = self.get(x, y, 0, 1);
-                let new_ox = (ox + sim.source_rate_oxidant).min(sim.c_max);
-                self.set(x, y, 0, 1, new_ox);
-                if let Some(ledger) = stoich.as_deref_mut() {
-                    record_boundary_source(ledger, 1, new_ox - ox, keep_events);
-                }
-                let ca = self.get(x, y, 0, 3);
-                let new_ca = (ca + sim.source_rate_carbon).min(sim.c_max);
-                self.set(x, y, 0, 3, new_ca);
-                if let Some(ledger) = stoich.as_deref_mut() {
-                    record_boundary_source(ledger, 3, new_ca - ca, keep_events);
-                }
+        for source in sim.effective_boundary_sources() {
+            if source.rate <= 0.0 {
+                continue;
             }
-        }
-
-        // Bottom face: reductant (species 2)
-        for y in 0..self.grid.y {
-            for x in 0..self.grid.x {
-                let z = self.grid.z - 1;
-                let re = self.get(x, y, z, 2);
-                let new_re = (re + sim.source_rate_reductant).min(sim.c_max);
-                self.set(x, y, z, 2, new_re);
-                if let Some(ledger) = stoich.as_deref_mut() {
-                    record_boundary_source(ledger, 2, new_re - re, keep_events);
+            let z = match source.face {
+                BoundaryFace::Top => 0,
+                BoundaryFace::Bottom => self.grid.z - 1,
+            };
+            for y in 0..self.grid.y {
+                for x in 0..self.grid.x {
+                    let old = self.get(x, y, z, source.species);
+                    let new = (old + source.rate).min(sim.c_max);
+                    self.set(x, y, z, source.species, new);
+                    if let Some(ledger) = stoich.as_deref_mut() {
+                        record_boundary_source(ledger, source.species, new - old, keep_events);
+                    }
                 }
             }
         }
@@ -576,6 +565,25 @@ mod tests {
             ..Default::default()
         };
         assert!(validate_diffusion_config(&sim).is_err());
+    }
+
+    #[test]
+    fn explicit_boundary_sources_replace_legacy_species() {
+        let mut field = Field::new(test_grid());
+        let sim = SimulationConfig {
+            source_rate_oxidant: 5.0,
+            boundary_sources: vec![BoundarySourceConfig {
+                species: EXT_ORGANIC,
+                face: BoundaryFace::Bottom,
+                rate: 0.25,
+            }],
+            ..Default::default()
+        };
+
+        field.apply_boundary_sources(&sim);
+
+        assert_eq!(field.get(0, 0, 0, EXT_OXIDANT), 0.0);
+        assert_eq!(field.get(0, 0, field.grid_z() - 1, EXT_ORGANIC), 0.25);
     }
 
     #[test]

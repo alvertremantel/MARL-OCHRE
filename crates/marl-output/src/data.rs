@@ -734,11 +734,21 @@ impl DataLogger {
             runtime_secs, ticks_per_sec
         )?;
         writeln!(w, "- Maintenance rate: {}", sim.lambda_maintenance)?;
-        writeln!(
-            w,
-            "- Boundary sources: oxidant={}, carbon={}, reductant={}",
-            sim.source_rate_oxidant, sim.source_rate_carbon, sim.source_rate_reductant
-        )?;
+        let sources = sim
+            .effective_boundary_sources()
+            .into_iter()
+            .filter(|source| source.rate > 0.0)
+            .map(|source| {
+                format!(
+                    "{}@{}={}",
+                    external_species_name(source.species),
+                    source.face.as_str(),
+                    source.rate
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        writeln!(w, "- Boundary sources: {sources}")?;
         writeln!(w)?;
 
         // ====================================================================

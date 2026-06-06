@@ -2,7 +2,7 @@ use marl_cell::cell::CellState;
 use marl_config::stoich::{
     StoichEventKind, StoichRecord, StoichReservoir, StoichStage, StoichTickLedger, external_delta,
 };
-use marl_config::{GridDims, SimulationConfig};
+use marl_config::{BoundaryFace, GridDims, SimulationConfig};
 use marl_field::field::Field;
 use rand::Rng;
 use std::collections::HashMap;
@@ -23,24 +23,21 @@ pub fn init_field_boundaries_with_stoich(
     // Prime only the boundary faces (configurable layers deep) so initial cells
     // have a local substrate source but the bulk field is empty.
     let layers = sim.boundary_prime_layers.min(grid.z);
-    for y in 0..grid.y {
-        for x in 0..grid.x {
-            // Top layers: some oxidant and carbon (atmosphere analog)
-            for z in 0..layers {
-                field.set(x, y, z, 1, sim.boundary_prime_oxidant); // oxidant
-                if let Some(ledger) = stoich.as_deref_mut() {
-                    record_prime(ledger, 1, sim.boundary_prime_oxidant, keep_events);
-                }
-                field.set(x, y, z, 3, sim.boundary_prime_carbon); // carbon
-                if let Some(ledger) = stoich.as_deref_mut() {
-                    record_prime(ledger, 3, sim.boundary_prime_carbon, keep_events);
-                }
-            }
-            // Bottom layers: some reductant (geological source analog)
-            for z in (grid.z - layers)..grid.z {
-                field.set(x, y, z, 2, sim.boundary_prime_reductant); // reductant
-                if let Some(ledger) = stoich.as_deref_mut() {
-                    record_prime(ledger, 2, sim.boundary_prime_reductant, keep_events);
+    for prime in sim.effective_boundary_primes() {
+        if prime.concentration <= 0.0 {
+            continue;
+        }
+        let z_range = match prime.face {
+            BoundaryFace::Top => 0..layers,
+            BoundaryFace::Bottom => (grid.z - layers)..grid.z,
+        };
+        for y in 0..grid.y {
+            for x in 0..grid.x {
+                for z in z_range.clone() {
+                    field.set(x, y, z, prime.species, prime.concentration);
+                    if let Some(ledger) = stoich.as_deref_mut() {
+                        record_prime(ledger, prime.species, prime.concentration, keep_events);
+                    }
                 }
             }
         }
@@ -179,6 +176,26 @@ mod tests {
 
         assert_eq!(field.get(0, 0, 0, 1), sim.boundary_prime_oxidant);
         assert_eq!(field.get(0, 0, grid.z - 1, 2), sim.boundary_prime_reductant);
+    }
+
+    #[test]
+    fn explicit_boundary_primes_replace_legacy_species() {
+        let grid = GridDims { x: 8, y: 6, z: 4 };
+        let sim = SimulationConfig {
+            boundary_prime_oxidant: 5.0,
+            boundary_primes: vec![marl_config::BoundaryPrimeConfig {
+                species: marl_config::EXT_SIGNAL_A,
+                face: BoundaryFace::Bottom,
+                concentration: 0.75,
+            }],
+            ..SimulationConfig::default()
+        };
+        let mut field = Field::new(grid);
+
+        init_field_boundaries(&mut field, &sim);
+
+        assert_eq!(field.get(0, 0, 0, marl_config::EXT_OXIDANT), 0.0);
+        assert_eq!(field.get(0, 0, grid.z - 1, marl_config::EXT_SIGNAL_A), 0.75);
     }
 
     #[test]
