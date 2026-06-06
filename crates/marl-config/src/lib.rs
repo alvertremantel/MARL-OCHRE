@@ -4,6 +4,7 @@
 //! consumed by every other crate in the workspace.
 
 pub mod stoich;
+use serde::Serialize;
 use stoich::StoichEnforcement;
 
 // ============================================================================
@@ -45,7 +46,7 @@ pub const EXT_SIGNAL_A: usize = 5;
 pub const EXT_SIGNAL_B: usize = 6;
 pub const EXT_STRUCTURAL: usize = 7;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct ChemicalComposition {
     pub carbon_backbone: f32,
     pub oxidizing_power: f32,
@@ -57,7 +58,7 @@ pub struct ChemicalComposition {
     pub toxin_group: f32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct ExternalSpeciesDescriptor {
     pub species: usize,
     pub name: &'static str,
@@ -273,10 +274,14 @@ pub const EXTERNAL_SPECIES: [ExternalSpeciesDescriptor; S_EXT] = [
 ];
 
 pub fn external_species_name(species: usize) -> &'static str {
+    external_species_descriptor(species).name
+}
+
+pub fn external_species_descriptor(species: usize) -> ExternalSpeciesDescriptor {
     EXTERNAL_SPECIES
         .get(species)
-        .map(|descriptor| descriptor.name)
-        .unwrap_or("unknown")
+        .copied()
+        .unwrap_or_else(|| ExternalSpeciesDescriptor::inert(species, "unknown"))
 }
 
 pub fn default_external_diffusion() -> [f32; S_EXT] {

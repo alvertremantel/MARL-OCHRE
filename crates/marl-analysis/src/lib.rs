@@ -4,6 +4,7 @@ use std::f64::consts::E;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use marl_config::{ChemicalComposition, external_species_descriptor};
 use marl_format::{
     RULESET_FULL_CANONICAL_SIZE, RULESET_FULL_CELL_REF_STRIDE, RULESET_FULL_FORMAT_VERSION,
     RULESET_FULL_HEADER_SIZE, RULESET_FULL_MAGIC, RunMeta,
@@ -151,12 +152,36 @@ pub struct SnapshotChemistry {
 pub struct SpeciesProfile {
     pub species: usize,
     pub name: String,
+    pub descriptor: SpeciesDescriptorProfile,
     pub total_concentration: f64,
     pub max_value: f64,
     pub surface_mean: f64,
     pub middle_mean: f64,
     pub deep_mean: f64,
     pub per_z_mean: Vec<f64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SpeciesDescriptorProfile {
+    pub bond_energy: f32,
+    pub extracellular_stability: f32,
+    pub membrane_permeability: f32,
+    pub storage_density: f32,
+    pub work_coupling: f32,
+    pub composition: ChemicalComposition,
+}
+
+impl From<marl_config::ExternalSpeciesDescriptor> for SpeciesDescriptorProfile {
+    fn from(descriptor: marl_config::ExternalSpeciesDescriptor) -> Self {
+        Self {
+            bond_energy: descriptor.bond_energy,
+            extracellular_stability: descriptor.extracellular_stability,
+            membrane_permeability: descriptor.membrane_permeability,
+            storage_density: descriptor.storage_density,
+            work_coupling: descriptor.work_coupling,
+            composition: descriptor.composition,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -497,6 +522,26 @@ pub fn render_run_terminal(analysis: &RunAnalysis) -> String {
             .join(", ");
         out.push_str(&format!("  ancestry: {ancestry}\n"));
     }
+    if let Some(chemistry) = analysis.chemistry.last() {
+        let roles = chemistry
+            .species_profiles
+            .iter()
+            .map(|profile| {
+                format!(
+                    "ext{} {}:{} total={:.2}",
+                    profile.species,
+                    profile.name,
+                    chemical_role(profile),
+                    profile.total_concentration
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        out.push_str(&format!(
+            "  chemistry roles at tick {}: {roles}\n",
+            chemistry.tick
+        ));
+    }
     if let Some(rulesets) = &analysis.rulesets {
         out.push_str(&format!(
             "  rulesets: {} unique / {} cells, dominant {:.1}%, H={:.2}\n",
@@ -717,6 +762,28 @@ pub fn render_run_markdown(analysis: &RunAnalysis) -> String {
                 chem.nonfinite_values,
                 chem.negative_values
             ));
+        }
+        if let Some(latest) = analysis.chemistry.last()
+            && !latest.species_profiles.is_empty()
+        {
+            out.push_str("\n### Latest Chemical Roles\n\n");
+            out.push_str("| species | role | total | max | bond_energy | stability | permeability | storage | work |\n");
+            out.push_str("|---|---|---:|---:|---:|---:|---:|---:|---:|\n");
+            for profile in &latest.species_profiles {
+                out.push_str(&format!(
+                    "| ext{} {} | {} | {:.3} | {:.3} | {:.2} | {:.2} | {:.2} | {:.2} | {:.2} |\n",
+                    profile.species,
+                    profile.name,
+                    chemical_role(profile),
+                    profile.total_concentration,
+                    profile.max_value,
+                    profile.descriptor.bond_energy,
+                    profile.descriptor.extracellular_stability,
+                    profile.descriptor.membrane_permeability,
+                    profile.descriptor.storage_density,
+                    profile.descriptor.work_coupling
+                ));
+            }
         }
     }
     if let Some(rulesets) = &analysis.rulesets {
@@ -1169,9 +1236,11 @@ fn summarize_field(tick: u64, meta: &RunMeta, bytes: &[u8]) -> AnalysisResult<Sn
         .map(|(i, species)| {
             let per_z_mean: Vec<f64> = sums[i].iter().map(|sum| *sum / layer_voxels).collect();
             let mid = per_z_mean.len() / 2;
+            let descriptor = external_species_descriptor(*species);
             SpeciesProfile {
                 species: *species,
-                name: species_name(*species).to_string(),
+                name: descriptor.name.to_string(),
+                descriptor: descriptor.into(),
                 total_concentration: totals[i],
                 max_value: if max_values[i].is_finite() {
                     max_values[i]
@@ -1884,14 +1953,26 @@ fn fraction(part: u64, total: u64) -> f64 {
     }
 }
 
-fn species_name(species: usize) -> &'static str {
-    match species {
-        0 => "free_energy",
-        1 => "oxidant",
-        2 => "reductant",
-        3 => "carbon",
-        4 => "organic",
-        _ => "unknown",
+fn chemical_role(profile: &SpeciesProfile) -> &'static str {
+    let composition = &profile.descriptor.composition;
+    if profile.descriptor.work_coupling >= 0.75 && profile.descriptor.bond_energy >= 0.5 {
+        "work_currency"
+    } else if composition.signal_group >= 0.5 {
+        "signal"
+    } else if composition.structural_group >= 0.5 {
+        "structural"
+    } else if profile.descriptor.storage_density >= 0.4 {
+        "storage"
+    } else if composition.oxidizing_power >= 0.5 {
+        "oxidant"
+    } else if composition.reducing_power >= 0.5 {
+        "reductant"
+    } else if composition.toxin_group >= 0.5 {
+        "toxin"
+    } else if composition.carbon_backbone >= 0.5 {
+        "carbon_source"
+    } else {
+        "inert"
     }
 }
 
@@ -1991,7 +2072,12 @@ mod tests {
         assert_eq!(species0.per_z_mean, vec![0.0, 10.0]);
         assert_eq!(species0.total_concentration, 10.0);
         assert_eq!(species0.max_value, 10.0);
+        assert_eq!(species0.name, "free_energy");
+        assert_eq!(species0.descriptor.work_coupling, 1.0);
+        assert_eq!(chemical_role(species0), "work_currency");
         assert_eq!(oxidant.per_z_mean, vec![1.0, 11.0]);
+        assert_eq!(oxidant.descriptor.composition.oxidizing_power, 1.0);
+        assert_eq!(chemical_role(oxidant), "oxidant");
     }
 
     #[test]
