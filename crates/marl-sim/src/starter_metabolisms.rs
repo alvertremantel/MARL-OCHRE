@@ -17,6 +17,8 @@ fn inactive_transport() -> TransportParams {
         secrete_rate: 0.0,
         ext_species: 0,
         int_species: 0,
+        gate_receptor: 0,
+        gate_weight: 0.0,
     }
 }
 
@@ -68,24 +70,32 @@ pub fn make_phototroph(pos: [u16; 3], lineage_id: u64) -> CellState {
         secrete_rate: 0.0,
         ext_species: 3,
         int_species: 3,
+        gate_receptor: 0,
+        gate_weight: 0.0,
     }; // carbon in (primary)
     transport[1] = TransportParams {
         uptake_rate: 0.0,
         secrete_rate: 0.6,
         ext_species: 1,
         int_species: 1,
+        gate_receptor: 0,
+        gate_weight: 0.0,
     }; // oxidant out
     transport[2] = TransportParams {
         uptake_rate: 0.0,
         secrete_rate: 0.3,
         ext_species: 4,
         int_species: 4,
+        gate_receptor: 0,
+        gate_weight: 0.0,
     }; // organic waste out
     transport[3] = TransportParams {
         uptake_rate: 0.1,
         secrete_rate: 0.0,
         ext_species: 2,
         int_species: 2,
+        gate_receptor: 0,
+        gate_weight: 0.0,
     }; // some reductant in (secondary)
 
     // Rxn 0: carbon(3) -> energy(0), cat=LIGHT(15)  — photosynthesis: CO2 + light -> energy
@@ -212,24 +222,32 @@ pub fn make_chemolithotroph(pos: [u16; 3], lineage_id: u64) -> CellState {
         secrete_rate: 0.0,
         ext_species: 1,
         int_species: 1,
+        gate_receptor: 0,
+        gate_weight: 0.0,
     }; // oxidant in
     transport[1] = TransportParams {
         uptake_rate: 0.7,
         secrete_rate: 0.0,
         ext_species: 2,
         int_species: 2,
+        gate_receptor: 0,
+        gate_weight: 0.0,
     }; // reductant in
     transport[2] = TransportParams {
         uptake_rate: 0.2,
         secrete_rate: 0.0,
         ext_species: 3,
         int_species: 3,
+        gate_receptor: 0,
+        gate_weight: 0.0,
     }; // carbon in (for enzymes)
     transport[3] = TransportParams {
         uptake_rate: 0.0,
         secrete_rate: 0.3,
         ext_species: 4,
         int_species: 4,
+        gate_receptor: 0,
+        gate_weight: 0.0,
     }; // organic waste out
 
     // Rxn 0: reductant(2) -> energy(0), cat=enzyme-A(5), cofactor=oxidant(1)  — sulfur oxidation
@@ -346,24 +364,32 @@ pub fn make_anaerobe(pos: [u16; 3], lineage_id: u64) -> CellState {
         secrete_rate: 0.0,
         ext_species: 2,
         int_species: 2,
+        gate_receptor: 0,
+        gate_weight: 0.0,
     }; // reductant in (primary fuel)
     transport[1] = TransportParams {
         uptake_rate: 0.3,
         secrete_rate: 0.0,
         ext_species: 3,
         int_species: 3,
+        gate_receptor: 0,
+        gate_weight: 0.0,
     }; // carbon in
     transport[2] = TransportParams {
         uptake_rate: 0.0,
         secrete_rate: 0.5,
         ext_species: 4,
         int_species: 4,
+        gate_receptor: 0,
+        gate_weight: 0.0,
     }; // organic waste out
     transport[3] = TransportParams {
         uptake_rate: 0.1,
         secrete_rate: 0.0,
         ext_species: 1,
         int_species: 1,
+        gate_receptor: 0,
+        gate_weight: 0.0,
     }; // oxidant in (inadvertent!)
 
     // Rxn 0: reductant(2) -> energy(0), cat=enzyme-A(5)  — anaerobic respiration (BUFFED v_max)

@@ -16,7 +16,7 @@ The current codebase is a Winogradsky-column style simulation: oxidant and carbo
 - Maintains a sparse cell population with 16 internal species and up to 16 reactions per cell
 - Diffuses chemistry with cell-body exclusion and local diffusion slowdown from structural deposits
 - Computes a per-voxel light field from top-down Beer-Lambert attenuation
-- Updates each cell through receptor, transport, reaction, effector, and fate phases
+- Updates each cell through receptor-gated transport, reaction, effector, and fate phases
 - Supports mutation of kinetic parameters and rare structural rewiring of reactions
 - Writes compressed binary field arrays and compact viewer cell records, plus optional CSV/PPM diagnostics
 - Can optionally write per-layer ruleset-parameter averages or per-cell genotype records on a slower cadence
@@ -44,7 +44,7 @@ A detailed architecture walkthrough lives in [`docs/INFO.md`](docs/INFO.md).
 
 ## Known In-Progress Or Partial Areas
 
-- Receptors are computed each tick but are not yet used to gate transport or reactions.
+- Receptors can gate transporter rates through evolvable per-transporter gate weights; reaction gating is still not implemented.
 - Horizontal gene transfer is behaviorally wired but disabled by default; it remains intentionally
   stochastic and limited to reaction-rule chunks.
 - The code includes spare external and internal species capacity for future chemistry expansion.
@@ -65,7 +65,7 @@ This repository is a functional prototype, not a polished platform. The core sim
 
 ## Status Summary
 
-The project is already a real simulation rather than a scaffold. Its current strengths are the field/cell split, the spatial exclusion model, the seeded ecological gradient, optional local HGT, the 3D viewer, and the data products. Its main unfinished areas are adaptive receptor wiring, HGT calibration, and broader chemistry expansion.
+The project is already a real simulation rather than a scaffold. Its current strengths are the field/cell split, the spatial exclusion model, the seeded ecological gradient, receptor-gated transport, optional local HGT, the 3D viewer, and the data products. Its main unfinished areas are reaction-level regulatory wiring, HGT calibration, and broader chemistry expansion.
 
 ## Documentation
 

@@ -133,6 +133,8 @@ mod tests {
                     secrete_rate: 0.0,
                     ext_species: 0,
                     int_species: 0,
+                    gate_receptor: 0,
+                    gate_weight: 0.0,
                 }),
                 reactions: std::array::from_fn(|_| Reaction {
                     substrate: 0,

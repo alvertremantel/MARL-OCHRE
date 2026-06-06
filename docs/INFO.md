@@ -93,13 +93,17 @@ The main biological logic is in `CellState::tick`.
 
 ### 1. Receptor Pass
 
-Receptors compute Hill-function activations from external concentrations. This machinery is present and documented, but the resulting activation vector is currently unused. In practice, this means the code has sensing primitives but not yet response gating.
+Receptors compute bounded Hill-function activations from external concentrations. Each transporter has an evolvable `gate_receptor` selector and signed `gate_weight`. The transport pass multiplies that transporter's uptake and secretion rates by:
 
-This is one of the clearest signs that the project was in the middle of another iteration: the subsystem is not missing, but it is not connected to downstream behavior.
+```text
+clamp(1 + gate_weight * activation[gate_receptor], 0, 4)
+```
+
+A zero `gate_weight` keeps transport unconditional. Positive weights amplify transport when the selected receptor is active; negative weights suppress it and can shut a transporter off. This is not a fitness bonus or survival guard. It only changes requested membrane flux before the existing external availability, internal-pool, and `c_max` caps are applied.
 
 ### 2. Transport Pass
 
-Transporters move chemicals between extracellular species and internal pools. Uptake and secretion are saturating functions. Transport is unconditional right now because receptor activation is not yet wired in.
+Transporters move chemicals between extracellular species and internal pools. Uptake and secretion are saturating functions, then receptor-gated through the per-transporter factor above. Starter metabolisms use neutral gates, so they begin with the same unconditional transport behavior and must evolve useful gating through mutation.
 
 Cells do not read the chemistry in their own occupied voxel. Instead, they average the chemistry of empty face-neighbor voxels. This is an important and deliberate choice: chemicals live in extracellular space, not inside the body-occupied voxel.
 
@@ -214,8 +218,8 @@ The output side of the project is already quite useful.
 - `run_meta.json` — grid dimensions, species counts, field byte length, and cell record stride
 - `tick_<T>.field.bin.zst` — compressed little-endian `f32` extracellular field data in `[z][y][x][species]` order by default (`.bin` if compression is disabled)
 - `tick_<T>.cells.bin.zst` — compressed packed 25-byte `ViewerCellRecord` array by default (`.bin` if compression is disabled); records contain position, lineage ID, starter type, and energy only
-- `tick_<T>.ruleset_layers.bin.zst` — optional per-z-layer slot-wise averages of continuous ruleset parameters, written on an independent cadence; topology/species IDs are omitted, so averaged slots can mix different reaction or transport semantics
-- `tick_<T>.rulesets.bin.zst` — optional per-cell deduplicated ruleset genotype dump with dictionary (dict section + per-cell position references), written on an independent cadence; it omits lineage, energy, and internal pools unless interpreted alongside the cell dump
+- `tick_<T>.ruleset_layers.bin.zst` — optional per-z-layer slot-wise averages of continuous ruleset parameters, including transporter gate weights, written on an independent cadence; topology/species IDs are omitted, so averaged slots can mix different reaction or transport semantics
+- `tick_<T>.rulesets.bin.zst` — optional per-cell deduplicated ruleset genotype dump with dictionary (dict section + per-cell position references), written on an independent cadence; current v2 transporter records include `uptake_rate`, `secrete_rate`, `ext_species`, `int_species`, `gate_receptor`, and `gate_weight`; it omits lineage, energy, and internal pools unless interpreted alongside the cell dump. The Rust analysis path and utility scripts also understand legacy v1/536-byte dumps, treating transporters as ungated.
 
 The shared schema for these files lives in `crates/marl-format/` so both engine and viewer can reference the same constants without code duplication.
 
@@ -260,7 +264,7 @@ The project is in a good prototype state. It is not a toy, but it is also not ye
 
 ### Present But Not Fully Integrated
 
-- receptor activations are computed but not used
+- receptor activations gate transporter uptake/secretion but do not yet gate reactions
 - optional HGT is wired into the tick loop, but disabled by default and still experimental
 - signaling species exist in the chemistry space but are not meaningfully used by starters
 - structural deposit species affects diffusion, but current starter metabolisms do not actively build a structural niche
@@ -304,4 +308,4 @@ That order follows the dependency chain from assumptions, to field physics, to c
 
 ## Bottom Line
 
-The codebase today is best described as a coherent CPU research prototype for spatial microbial evolution. Its strongest ideas are already in place: spatial exclusion, chemically mediated interaction, depth-structured ecology, lineage-producing division, optional local HGT, and decent analysis outputs. Its most obvious unfinished step is moving from passive chemistry-following cells to cells whose sensing machinery actually modulates behavior, with HGT remaining an experimental branch rather than a calibrated biological model.
+The codebase today is best described as a coherent CPU research prototype for spatial microbial evolution. Its strongest ideas are already in place: spatial exclusion, chemically mediated interaction, depth-structured ecology, lineage-producing division, receptor-gated transport, optional local HGT, and decent analysis outputs. Its most obvious unfinished steps are extending regulatory wiring beyond transport, calibrating HGT, and making broader chemistry/signaling stories easier to analyze.

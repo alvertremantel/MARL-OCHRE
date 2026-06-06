@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 compile_error!("binary dumps declare little-endian layout and require a little-endian target");
 
 const RULESET_LAYER_AVG_F32_COUNT: usize =
-    3 * S_RECEPTORS + 2 * S_TRANSPORTERS + 3 * R_MAX + 2 * S_EFFECTORS + 6;
+    3 * S_RECEPTORS + 3 * S_TRANSPORTERS + 3 * R_MAX + 2 * S_EFFECTORS + 6;
 const RULESET_LAYER_RECORD_STRIDE: usize = 8 + 4 * RULESET_LAYER_AVG_F32_COUNT;
 
 fn as_bytes<T>(slice: &[T]) -> &[u8] {
@@ -98,6 +98,7 @@ fn validate_ruleset_finite(
         for (name, value) in [
             ("uptake_rate", transport.uptake_rate),
             ("secrete_rate", transport.secrete_rate),
+            ("gate_weight", transport.gate_weight),
         ] {
             if !value.is_finite() {
                 return Err(Error::new(
@@ -258,7 +259,8 @@ fn append_ruleset_layer_values(buf: &mut [f64; RULESET_LAYER_AVG_F32_COUNT], rul
     for transport in &ruleset.transport {
         buf[i] += transport.uptake_rate as f64;
         buf[i + 1] += transport.secrete_rate as f64;
-        i += 2;
+        buf[i + 2] += transport.gate_weight as f64;
+        i += 3;
     }
     for reaction in &ruleset.reactions {
         buf[i] += reaction.k_m as f64;
@@ -345,13 +347,15 @@ fn ruleset_to_canonical_bytes(ruleset: &Ruleset) -> [u8; RULESET_FULL_CANONICAL_
         off += 12;
     }
 
-    // transport: 8 × {uptake_rate:f32, secrete_rate:f32, ext_species:u8, int_species:u8}
+    // transport: 8 × {uptake_rate:f32, secrete_rate:f32, ext_species:u8, int_species:u8, gate_receptor:u8, gate_weight:f32}
     for t in &ruleset.transport {
         buf[off..off + 4].copy_from_slice(&t.uptake_rate.to_le_bytes());
         buf[off + 4..off + 8].copy_from_slice(&t.secrete_rate.to_le_bytes());
         buf[off + 8] = t.ext_species;
         buf[off + 9] = t.int_species;
-        off += 10;
+        buf[off + 10] = t.gate_receptor;
+        buf[off + 11..off + 15].copy_from_slice(&t.gate_weight.to_le_bytes());
+        off += 15;
     }
 
     // reactions: 16 × {substrate:u8, product:u8, catalyst:u8, cofactor:u8, k_m:f32, v_max:f32, k_cat:f32}
@@ -646,6 +650,8 @@ mod tests {
                 secrete_rate: seed + 3.0 + i as f32,
                 ext_species: i as u8,
                 int_species: i as u8,
+                gate_receptor: i as u8,
+                gate_weight: seed - 0.5 + i as f32 * 0.1,
             }),
             reactions: std::array::from_fn(|i| Reaction {
                 substrate: i as u8,
@@ -757,7 +763,7 @@ mod tests {
             meta_json["ruleset_layer_file_pattern"],
             "tick_<T>.ruleset_layers.bin.zst"
         );
-        assert_eq!(meta_json["ruleset_layer_record_stride"], 448);
+        assert_eq!(meta_json["ruleset_layer_record_stride"], 480);
     }
 
     #[test]
@@ -935,7 +941,7 @@ mod tests {
         // Parse header
         assert_eq!(&bytes[0..4], b"MRSF");
         let version = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
-        assert_eq!(version, 1);
+        assert_eq!(version, RULESET_FULL_FORMAT_VERSION);
         let _flags = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
         let dict_count = u32::from_le_bytes(bytes[12..16].try_into().unwrap());
         let cell_count = u32::from_le_bytes(bytes[16..20].try_into().unwrap());
@@ -1026,7 +1032,7 @@ mod tests {
         );
         assert_eq!(meta_json["ruleset_full_cell_ref_stride"], 10);
         assert_eq!(meta_json["ruleset_full_magic_ascii"], "MRSF");
-        assert_eq!(meta_json["ruleset_full_format_version"], 1);
+        assert_eq!(meta_json["ruleset_full_format_version"], 2);
         assert!(meta_json["ruleset_full_payload_layout"].is_string());
     }
 
