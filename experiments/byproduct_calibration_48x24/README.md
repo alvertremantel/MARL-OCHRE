@@ -76,15 +76,22 @@ Per-seed comparisons can be produced by passing each seed's four directories to
 - `reaction_byproduct_amount`
 - `reaction_leakage_energy_to_heat`
 - `byproduct_excess_retained_fraction`
-- `byproduct_cross_feeding_candidates`
-- `byproduct_public_pool_candidates`
+- `adjusted_uptake_pressure_candidates`
+- `adjusted_public_pool_candidates`
 - paired final population and growth versus `byp000`
+
+The uptake-pressure candidate count is an indirect proxy: it means a produced
+byproduct species has low same-seed baseline-adjusted retention and evolved
+uptake pressure in the final rulesets. It is not direct proof of cross-feeding;
+that will require flux and lineage attribution in a later analysis slice.
+Trace byproduct species remain visible in the adjusted species table, but are
+not counted as uptake-pressure or public-pool candidates.
 
 Decision heuristics:
 
-- `byp025` is too high if it repeatedly produces public-pool candidates or
-  excess retained fraction `>= 0.75`.
+- `byp025` is too high if it repeatedly produces adjusted public-pool
+  candidates or clipped excess retained fraction `>= 0.75`.
 - `byp008` remains plausible if it produces measurable byproducts without
-  repeated public-pool flags or strong paired population divergence.
+  repeated adjusted public-pool flags or strong paired population divergence.
 - `byp002` is the low-effect guardrail if `byp008` is too noisy or too
   accumulative.

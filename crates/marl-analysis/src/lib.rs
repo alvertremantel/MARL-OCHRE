@@ -64,6 +64,7 @@ pub struct RunAnalysis {
 #[derive(Debug, Clone, Serialize)]
 pub struct ComparisonAnalysis {
     pub runs: Vec<RunComparisonEntry>,
+    pub paired_byproduct_population: Vec<ByproductPairedComparison>,
     pub findings: Vec<Finding>,
     pub warnings: Vec<String>,
 }
@@ -92,10 +93,40 @@ pub struct RunComparisonEntry {
     pub reaction_leakage_energy_to_heat: Option<f64>,
     pub byproduct_final_pool: Option<f64>,
     pub byproduct_retained_fraction: Option<f64>,
+    pub byproduct_signed_excess_final_pool: Option<f64>,
+    pub byproduct_signed_excess_retained_fraction: Option<f64>,
     pub byproduct_excess_final_pool: Option<f64>,
     pub byproduct_excess_retained_fraction: Option<f64>,
     pub byproduct_cross_feeding_candidates: Option<u64>,
     pub byproduct_public_pool_candidates: Option<u64>,
+    pub byproduct_adjusted_species: Vec<ByproductAdjustedSpeciesComparison>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ByproductAdjustedSpeciesComparison {
+    pub species_index: i16,
+    pub name: String,
+    pub role: String,
+    pub produced_amount: f64,
+    pub baseline_field_total: f64,
+    pub final_field_total: f64,
+    pub signed_excess_final_pool: f64,
+    pub clipped_excess_final_pool: f64,
+    pub clipped_excess_retained_fraction: Option<f64>,
+    pub adjusted_interpretation: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ByproductPairedComparison {
+    pub rng_seed: Option<u64>,
+    pub baseline_name: String,
+    pub run_name: String,
+    pub byproduct_amount: Option<f64>,
+    pub delta_final_population: Option<i64>,
+    pub final_population_ratio: Option<f64>,
+    pub delta_growth_factor: Option<f64>,
+    pub delta_final_avg_energy: Option<f64>,
+    pub byproduct_excess_retained_fraction: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -385,6 +416,8 @@ const RECEPTOR_PAYLOAD_BYTES: usize = 8 * 12;
 const TRANSPORT_V1_STRIDE: usize = 10;
 const TRANSPORT_V2_STRIDE: usize = 15;
 const ACTIVE_TRANSPORT_THRESHOLD: f32 = 1e-9;
+const BYPRODUCT_CANDIDATE_MIN_AMOUNT: f64 = 1e-6;
+const BYPRODUCT_CANDIDATE_MIN_TOTAL_FRACTION: f64 = 1e-4;
 const MAX_COMMON_TRANSPORT_PAIRS: usize = 8;
 
 #[derive(Debug, Clone, Copy)]
@@ -596,9 +629,11 @@ pub fn compare_runs(
         .map(RunComparisonEntry::from_analysis)
         .collect::<Vec<_>>();
     warnings.extend(apply_byproduct_baseline_adjustment(&analyses, &mut runs));
+    let paired_byproduct_population = summarize_paired_byproduct_population(&runs);
     let findings = classify_comparison_findings(&runs);
     Ok(ComparisonAnalysis {
         runs,
+        paired_byproduct_population,
         findings,
         warnings,
     })
@@ -782,7 +817,7 @@ pub fn render_run_terminal(analysis: &RunAnalysis) -> String {
     }
     if let Some(calibration) = &analysis.byproduct_calibration {
         out.push_str(&format!(
-            "  byproduct calibration: produced={:.4}, final_pool={}, retained={}, field_tick={:?}, ruleset_tick={:?}, missing_field_species={}, cross_feed_candidates={}, public_pool_candidates={}\n",
+            "  byproduct calibration: produced={:.4}, final_pool={}, retained={}, field_tick={:?}, ruleset_tick={:?}, missing_field_species={}, uptake_pressure_candidates={}, public_pool_candidates={}\n",
             calibration.total_byproduct_amount,
             calibration
                 .final_byproduct_pool
@@ -881,7 +916,7 @@ pub fn render_comparison_terminal(analysis: &ComparisonAnalysis) -> String {
     out.push_str("MARL run comparison\n");
     for run in &analysis.runs {
         out.push_str(&format!(
-            "  {}: rng_seed={}, final_pop={:?}, growth={:?}, top={:?}, dominant_genotype={:?}, active_transporters={:?}, byproduct={}, gross_retained={}, excess_retained={}, leakage_heat={}\n",
+            "  {}: rng_seed={}, final_pop={:?}, growth={:?}, top={:?}, dominant_genotype={:?}, active_transporters={:?}, byproduct={}, gross_retained={}, signed_excess_retained={}, clipped_excess_retained={}, leakage_heat={}\n",
             run.name,
             run.rng_seed
                 .map(|seed| seed.to_string())
@@ -899,6 +934,9 @@ pub fn render_comparison_terminal(analysis: &ComparisonAnalysis) -> String {
             run.byproduct_retained_fraction
                 .map(|value| format!("{value:.3}"))
                 .unwrap_or_else(|| "n/a".to_string()),
+            run.byproduct_signed_excess_retained_fraction
+                .map(|value| format!("{value:.3}"))
+                .unwrap_or_else(|| "n/a".to_string()),
             run.byproduct_excess_retained_fraction
                 .map(|value| format!("{value:.3}"))
                 .unwrap_or_else(|| "n/a".to_string()),
@@ -906,6 +944,37 @@ pub fn render_comparison_terminal(analysis: &ComparisonAnalysis) -> String {
                 .map(|value| format!("{value:.4}"))
                 .unwrap_or_else(|| "n/a".to_string())
         ));
+    }
+    if !analysis.paired_byproduct_population.is_empty() {
+        out.push_str("  paired byproduct population effects:\n");
+        for pair in &analysis.paired_byproduct_population {
+            out.push_str(&format!(
+                "    {} vs {}: rng_seed={}, byproduct={}, delta_pop={}, pop_ratio={}, delta_growth={}, delta_energy={}, clipped_excess_retained={}\n",
+                pair.run_name,
+                pair.baseline_name,
+                pair.rng_seed
+                    .map(|seed| seed.to_string())
+                    .unwrap_or_else(|| "n/a".to_string()),
+                pair.byproduct_amount
+                    .map(|value| format!("{value:.4}"))
+                    .unwrap_or_else(|| "n/a".to_string()),
+                pair.delta_final_population
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "n/a".to_string()),
+                pair.final_population_ratio
+                    .map(|value| format!("{value:.3}"))
+                    .unwrap_or_else(|| "n/a".to_string()),
+                pair.delta_growth_factor
+                    .map(|value| format!("{value:.3}"))
+                    .unwrap_or_else(|| "n/a".to_string()),
+                pair.delta_final_avg_energy
+                    .map(|value| format!("{value:.3}"))
+                    .unwrap_or_else(|| "n/a".to_string()),
+                pair.byproduct_excess_retained_fraction
+                    .map(|value| format!("{value:.3}"))
+                    .unwrap_or_else(|| "n/a".to_string())
+            ));
+        }
     }
     for finding in &analysis.findings {
         out.push_str(&format!(
@@ -1301,11 +1370,13 @@ pub fn render_comparison_markdown(analysis: &ComparisonAnalysis) -> String {
         .any(|run| run.stoich_total_events.is_some())
     {
         out.push_str("\n## Stoichiometry V2 Comparison\n\n");
-        out.push_str("| run | events | imbalanced | byproduct_events | byproduct_amount | gross_final_byproduct_pool | gross_retained_fraction | excess_final_byproduct_pool | excess_retained_fraction | cross_feed_candidates | public_pool_candidates | leakage_events | leakage_heat |\n");
-        out.push_str("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n");
+        out.push_str("| run | events | imbalanced | byproduct_events | byproduct_amount | gross_final_byproduct_pool | gross_retained_fraction | signed_excess_final_pool | signed_excess_retained_fraction | clipped_excess_final_pool | clipped_excess_retained_fraction | adjusted_uptake_pressure_candidates | adjusted_public_pool_candidates | leakage_events | leakage_heat |\n");
+        out.push_str(
+            "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n",
+        );
         for run in &analysis.runs {
             out.push_str(&format!(
-                "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+                "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
                 run.name,
                 display_opt_u64(run.stoich_total_events),
                 display_opt_u64(run.stoich_imbalanced_events),
@@ -1313,12 +1384,64 @@ pub fn render_comparison_markdown(analysis: &ComparisonAnalysis) -> String {
                 display_opt_f64(run.reaction_byproduct_amount),
                 display_opt_f64(run.byproduct_final_pool),
                 display_opt_f64(run.byproduct_retained_fraction),
+                display_opt_f64(run.byproduct_signed_excess_final_pool),
+                display_opt_f64(run.byproduct_signed_excess_retained_fraction),
                 display_opt_f64(run.byproduct_excess_final_pool),
                 display_opt_f64(run.byproduct_excess_retained_fraction),
                 display_opt_u64(run.byproduct_cross_feeding_candidates),
                 display_opt_u64(run.byproduct_public_pool_candidates),
                 display_opt_u64(run.reaction_leakage_events),
                 display_opt_f64(run.reaction_leakage_energy_to_heat)
+            ));
+        }
+    }
+    if analysis
+        .runs
+        .iter()
+        .any(|run| !run.byproduct_adjusted_species.is_empty())
+    {
+        out.push_str("\n## Baseline-Adjusted Byproduct Species\n\n");
+        out.push_str("| run | species | role | produced | baseline_pool | final_pool | signed_excess | clipped_excess | clipped_retained | adjusted_interpretation |\n");
+        out.push_str("|---|---:|---|---:|---:|---:|---:|---:|---:|---|\n");
+        for run in &analysis.runs {
+            for species in &run.byproduct_adjusted_species {
+                out.push_str(&format!(
+                    "| {} | {} {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+                    run.name,
+                    species.species_index,
+                    species.name,
+                    species.role,
+                    display_f64(species.produced_amount),
+                    display_f64(species.baseline_field_total),
+                    display_f64(species.final_field_total),
+                    display_f64(species.signed_excess_final_pool),
+                    display_f64(species.clipped_excess_final_pool),
+                    display_opt_f64(species.clipped_excess_retained_fraction),
+                    species.adjusted_interpretation
+                ));
+            }
+        }
+    }
+    if !analysis.paired_byproduct_population.is_empty() {
+        out.push_str("\n## Paired Byproduct Population Effects\n\n");
+        out.push_str("| rng_seed | run | baseline | byproduct_amount | delta_final_pop | final_pop_ratio | delta_growth | delta_final_energy | clipped_excess_retained_fraction |\n");
+        out.push_str("|---:|---|---|---:|---:|---:|---:|---:|---:|\n");
+        for pair in &analysis.paired_byproduct_population {
+            out.push_str(&format!(
+                "| {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+                pair.rng_seed
+                    .map(|seed| seed.to_string())
+                    .unwrap_or_else(|| "n/a".to_string()),
+                pair.run_name,
+                pair.baseline_name,
+                display_opt_f64(pair.byproduct_amount),
+                pair.delta_final_population
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "n/a".to_string()),
+                display_opt_f64(pair.final_population_ratio),
+                display_opt_f64(pair.delta_growth_factor),
+                display_opt_f64(pair.delta_final_avg_energy),
+                display_opt_f64(pair.byproduct_excess_retained_fraction)
             ));
         }
     }
@@ -1691,10 +1814,12 @@ fn summarize_byproduct_calibration(
                 .map(|summary| summary.secretion_rate_sum)
                 .unwrap_or(0.0),
         );
-        if interpretation == "cross_feeding_candidate" {
-            cross_feeding_candidates += 1;
-        } else if interpretation == "public_pool_candidate" {
-            public_pool_candidates += 1;
+        if is_meaningful_byproduct_candidate(byproduct.amount, stoich.reaction_byproduct_amount) {
+            if interpretation == "cross_feeding_candidate" {
+                cross_feeding_candidates += 1;
+            } else if interpretation == "public_pool_candidate" {
+                public_pool_candidates += 1;
+            }
         }
         species.push(ByproductSpeciesCalibration {
             species_index,
@@ -1757,6 +1882,12 @@ fn classify_byproduct_calibration(
     } else {
         "production_only"
     }
+}
+
+fn is_meaningful_byproduct_candidate(produced_amount: f64, total_byproduct_amount: f64) -> bool {
+    produced_amount >= BYPRODUCT_CANDIDATE_MIN_AMOUNT
+        && produced_amount
+            >= total_byproduct_amount.max(0.0) * BYPRODUCT_CANDIDATE_MIN_TOTAL_FRACTION
 }
 
 fn apply_byproduct_baseline_adjustment(
@@ -1870,7 +2001,11 @@ fn apply_byproduct_baseline_adjustment(
             ));
             continue;
         }
-        let mut excess_pool = 0.0;
+        let mut signed_excess_pool = 0.0;
+        let mut clipped_excess_pool = 0.0;
+        let mut adjusted_uptake_pressure_candidates = 0;
+        let mut adjusted_public_pool_candidates = 0;
+        let mut adjusted_species = Vec::new();
         let mut complete = true;
         for species in &calibration.species {
             let Some(run_total) = species.final_field_total else {
@@ -1886,14 +2021,136 @@ fn apply_byproduct_baseline_adjustment(
                 complete = false;
                 break;
             };
-            excess_pool += (run_total - baseline_total).max(0.0);
+            let signed_excess = run_total - baseline_total;
+            let clipped_excess = signed_excess.max(0.0);
+            signed_excess_pool += signed_excess;
+            clipped_excess_pool += clipped_excess;
+            let adjusted_retained_fraction =
+                (species.produced_amount > 0.0).then_some(clipped_excess / species.produced_amount);
+            let adjusted_interpretation = classify_byproduct_calibration(
+                adjusted_retained_fraction,
+                species.uptake_rate_sum,
+                species.secretion_rate_sum,
+            );
+            let meaningful_candidate =
+                is_meaningful_byproduct_candidate(species.produced_amount, produced);
+            if meaningful_candidate {
+                if adjusted_interpretation == "cross_feeding_candidate" {
+                    adjusted_uptake_pressure_candidates += 1;
+                } else if adjusted_interpretation == "public_pool_candidate" {
+                    adjusted_public_pool_candidates += 1;
+                }
+            }
+            let adjusted_interpretation = if meaningful_candidate {
+                adjusted_interpretation
+            } else if clipped_excess > 0.0 {
+                "trace_byproduct_field_shift"
+            } else {
+                "trace_byproduct"
+            };
+            adjusted_species.push(ByproductAdjustedSpeciesComparison {
+                species_index: species.species_index,
+                name: species.name.clone(),
+                role: species.role.clone(),
+                produced_amount: species.produced_amount,
+                baseline_field_total: baseline_total,
+                final_field_total: run_total,
+                signed_excess_final_pool: signed_excess,
+                clipped_excess_final_pool: clipped_excess,
+                clipped_excess_retained_fraction: adjusted_retained_fraction,
+                adjusted_interpretation: adjusted_interpretation.to_string(),
+            });
         }
         if complete {
-            run.byproduct_excess_final_pool = Some(excess_pool);
-            run.byproduct_excess_retained_fraction = Some(excess_pool / produced);
+            run.byproduct_signed_excess_final_pool = Some(signed_excess_pool);
+            run.byproduct_signed_excess_retained_fraction = Some(signed_excess_pool / produced);
+            run.byproduct_excess_final_pool = Some(clipped_excess_pool);
+            run.byproduct_excess_retained_fraction = Some(clipped_excess_pool / produced);
+            run.byproduct_cross_feeding_candidates = Some(adjusted_uptake_pressure_candidates);
+            run.byproduct_public_pool_candidates = Some(adjusted_public_pool_candidates);
+            run.byproduct_adjusted_species = adjusted_species;
         }
     }
     warnings
+}
+
+fn summarize_paired_byproduct_population(
+    runs: &[RunComparisonEntry],
+) -> Vec<ByproductPairedComparison> {
+    let baseline_candidates = runs
+        .iter()
+        .filter(|run| {
+            run.reaction_byproduct_amount
+                .is_some_and(|amount| amount == 0.0)
+        })
+        .collect::<Vec<_>>();
+    if baseline_candidates.is_empty() {
+        return Vec::new();
+    }
+
+    let mut seed_baselines: HashMap<u64, &RunComparisonEntry> = HashMap::new();
+    let mut duplicate_seed_baselines = HashSet::new();
+    for baseline in &baseline_candidates {
+        if let Some(seed) = baseline.rng_seed
+            && seed_baselines.insert(seed, baseline).is_some()
+        {
+            duplicate_seed_baselines.insert(seed);
+        }
+    }
+
+    let mut pairs = Vec::new();
+    for run in runs {
+        let Some(byproduct_amount) = run.reaction_byproduct_amount.filter(|amount| *amount > 0.0)
+        else {
+            continue;
+        };
+        let baseline = if let Some(seed) = run.rng_seed {
+            if duplicate_seed_baselines.contains(&seed) {
+                continue;
+            }
+            seed_baselines.get(&seed).copied()
+        } else if baseline_candidates.len() == 1 {
+            baseline_candidates.first().copied()
+        } else {
+            None
+        };
+        let Some(baseline) = baseline else {
+            continue;
+        };
+
+        let delta_final_population = match (run.final_population, baseline.final_population) {
+            (Some(run_pop), Some(baseline_pop)) => Some(run_pop as i64 - baseline_pop as i64),
+            _ => None,
+        };
+        let final_population_ratio = match (run.final_population, baseline.final_population) {
+            (Some(run_pop), Some(baseline_pop)) if baseline_pop > 0 => {
+                Some(run_pop as f64 / baseline_pop as f64)
+            }
+            _ => None,
+        };
+        let delta_growth_factor = match (run.growth_factor, baseline.growth_factor) {
+            (Some(run_growth), Some(baseline_growth)) => Some(run_growth - baseline_growth),
+            _ => None,
+        };
+        let delta_final_avg_energy = match (run.final_avg_energy, baseline.final_avg_energy) {
+            (Some(run_energy), Some(baseline_energy)) => Some(run_energy - baseline_energy),
+            _ => None,
+        };
+
+        pairs.push(ByproductPairedComparison {
+            rng_seed: run.rng_seed,
+            baseline_name: baseline.name.clone(),
+            run_name: run.name.clone(),
+            byproduct_amount: Some(byproduct_amount),
+            delta_final_population,
+            final_population_ratio,
+            delta_growth_factor,
+            delta_final_avg_energy,
+            byproduct_excess_retained_fraction: run.byproduct_excess_retained_fraction,
+        });
+    }
+
+    pairs
 }
 
 fn read_run_rng_seed(run_dir: &Path) -> Option<u64> {
@@ -2809,7 +3066,7 @@ fn classify_run_findings(analysis: &RunAnalysis) -> Vec<Finding> {
             findings.push(finding(
                 "byproduct_cross_feeding_candidate",
                 FindingLevel::Interesting,
-                "Byproduct cross-feeding candidate",
+                "Byproduct uptake-pressure candidate",
                 format!(
                     "{} byproduct species show uptake pressure with low final retention.",
                     calibration.cross_feeding_candidates
@@ -2903,9 +3160,9 @@ fn classify_comparison_findings(runs: &[RunComparisonEntry]) -> Vec<Finding> {
         findings.push(finding(
             "comparison_byproduct_cross_feeding_candidate",
             FindingLevel::Interesting,
-            "Byproduct cross-feeding candidate in comparison",
+            "Byproduct uptake-pressure candidate in comparison",
             format!(
-                "{} had {} byproduct species with uptake pressure and low retention.",
+                "{} had {} byproduct species with baseline-adjusted low retention and uptake pressure.",
                 run.name, count
             ),
             Vec::new(),
@@ -3023,12 +3280,15 @@ impl RunComparisonEntry {
                 .and_then(|calibration| calibration.final_byproduct_pool),
             byproduct_retained_fraction: byproduct_calibration
                 .and_then(|calibration| calibration.retained_fraction),
+            byproduct_signed_excess_final_pool: None,
+            byproduct_signed_excess_retained_fraction: None,
             byproduct_excess_final_pool: None,
             byproduct_excess_retained_fraction: None,
             byproduct_cross_feeding_candidates: byproduct_calibration
                 .map(|calibration| calibration.cross_feeding_candidates),
             byproduct_public_pool_candidates: byproduct_calibration
                 .map(|calibration| calibration.public_pool_candidates),
+            byproduct_adjusted_species: Vec::new(),
         }
     }
 }
@@ -3116,6 +3376,10 @@ fn display_opt_f64(value: Option<f64>) -> String {
     value
         .map(|value| format!("{value:.3}"))
         .unwrap_or_else(|| "n/a".to_string())
+}
+
+fn display_f64(value: f64) -> String {
+    format!("{value:.3}")
 }
 
 fn display_opt_pct(value: Option<f64>) -> String {
@@ -3586,13 +3850,17 @@ mod tests {
             reaction_leakage_energy_to_heat: byproduct.map(|value| value / 2.0),
             byproduct_final_pool: byproduct.map(|value| value / 4.0),
             byproduct_retained_fraction: byproduct.map(|_| 0.25),
+            byproduct_signed_excess_final_pool: byproduct.map(|value| value / 10.0),
+            byproduct_signed_excess_retained_fraction: byproduct.map(|_| 0.1),
             byproduct_excess_final_pool: byproduct.map(|value| value / 5.0),
             byproduct_excess_retained_fraction: byproduct.map(|_| 0.2),
             byproduct_cross_feeding_candidates: byproduct.map(|_| 1),
             byproduct_public_pool_candidates: byproduct.map(|_| 0),
+            byproduct_adjusted_species: Vec::new(),
         };
         let analysis = ComparisonAnalysis {
             runs: vec![run("with_events", Some(2.5)), run("without_events", None)],
+            paired_byproduct_population: Vec::new(),
             findings: Vec::new(),
             warnings: Vec::new(),
         };
@@ -3602,7 +3870,8 @@ mod tests {
 
         assert!(terminal.contains("byproduct=2.5000"));
         assert!(terminal.contains("gross_retained=0.250"));
-        assert!(terminal.contains("excess_retained=0.200"));
+        assert!(terminal.contains("signed_excess_retained=0.100"));
+        assert!(terminal.contains("clipped_excess_retained=0.200"));
         assert!(terminal.contains("leakage_heat=1.2500"));
         assert!(terminal.contains("without_events:"));
         assert!(terminal.contains("byproduct=n/a"));
@@ -3611,10 +3880,10 @@ mod tests {
             "| with_events | n/a | 10 | 12 | 1.200 | 0.500 | 40.0 | 50.0 | 10.0 | n/a | n/a | n/a | n/a |"
         ));
         assert!(markdown.contains(
-            "| with_events | 100 | 3 | 7 | 2.500 | 0.625 | 0.250 | 0.500 | 0.200 | 1 | 0 | 11 | 1.250 |"
+            "| with_events | 100 | 3 | 7 | 2.500 | 0.625 | 0.250 | 0.250 | 0.100 | 0.500 | 0.200 | 1 | 0 | 11 | 1.250 |"
         ));
         assert!(markdown.contains(
-            "| without_events | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a |"
+            "| without_events | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a |"
         ));
     }
 
@@ -3841,11 +4110,127 @@ mod tests {
         assert_eq!(runs[0].byproduct_excess_final_pool, None);
         assert_eq!(runs[1].byproduct_excess_final_pool, Some(12.0));
         assert_eq!(runs[1].byproduct_excess_retained_fraction, Some(0.6));
+        assert_eq!(runs[1].byproduct_signed_excess_final_pool, Some(12.0));
+        assert_eq!(runs[1].byproduct_signed_excess_retained_fraction, Some(0.6));
         let findings = classify_comparison_findings(&runs);
         assert!(
             !findings
                 .iter()
                 .any(|finding| finding.id == "comparison_byproduct_excess_pool_candidate")
+        );
+    }
+
+    #[test]
+    fn comparison_candidates_use_baseline_adjusted_species_excess() {
+        let baseline = minimal_analysis(
+            "baseline",
+            vec![SnapshotChemistry {
+                tick: 10,
+                nonfinite_values: 0,
+                negative_values: 0,
+                oxidant_penetration_z: None,
+                reductant_penetration_z: None,
+                redox_overlap_layers: 0,
+                species_profiles: vec![species_profile(4, 100.0), species_profile(7, 10.0)],
+            }],
+            Some(zero_byproduct_stoich()),
+            None,
+        );
+        let byproduct = minimal_analysis(
+            "byproduct",
+            vec![SnapshotChemistry {
+                tick: 10,
+                nonfinite_values: 0,
+                negative_values: 0,
+                oxidant_penetration_z: None,
+                reductant_penetration_z: None,
+                redox_overlap_layers: 0,
+                species_profiles: vec![species_profile(4, 100.5), species_profile(7, 9.0)],
+            }],
+            Some(StoichV2Analysis {
+                summary_present: false,
+                events_present: true,
+                total_ticks: None,
+                enforcement: None,
+                gross_residual_abs_sum: None,
+                total_events: 2,
+                imbalanced_events: 0,
+                reaction_byproduct_events: 2,
+                reaction_byproduct_amount: 1.000000001,
+                reaction_byproduct_model_abs: 0.0,
+                reaction_byproduct_residual_abs: 0.0,
+                reaction_byproduct_by_species: vec![
+                    StoichSpeciesEventSummary {
+                        species_index: 4,
+                        amount: 1.0,
+                        events: 1,
+                    },
+                    StoichSpeciesEventSummary {
+                        species_index: 7,
+                        amount: 1e-9,
+                        events: 1,
+                    },
+                ],
+                reaction_leakage_events: 0,
+                reaction_leakage_amount: 0.0,
+                reaction_leakage_energy_to_heat: 0.0,
+            }),
+            Some(ByproductCalibrationSummary {
+                total_byproduct_amount: 1.000000001,
+                final_byproduct_pool: Some(109.5),
+                retained_fraction: Some(109.5),
+                field_tick: Some(10),
+                ruleset_tick: None,
+                missing_field_species: 0,
+                cross_feeding_candidates: 1,
+                public_pool_candidates: 1,
+                species: vec![
+                    ByproductSpeciesCalibration {
+                        species_index: 4,
+                        name: "organic".to_string(),
+                        role: "carbon_source".to_string(),
+                        produced_amount: 1.0,
+                        final_field_total: Some(100.5),
+                        retained_fraction: Some(100.5),
+                        uptake_active_slots: 0,
+                        secretion_active_slots: 0,
+                        uptake_rate_sum: 0.0,
+                        secretion_rate_sum: 0.0,
+                        interpretation: "public_pool_candidate".to_string(),
+                    },
+                    ByproductSpeciesCalibration {
+                        species_index: 7,
+                        name: "structural".to_string(),
+                        role: "structural".to_string(),
+                        produced_amount: 1e-9,
+                        final_field_total: Some(9.0),
+                        retained_fraction: Some(9.0e9),
+                        uptake_active_slots: 1,
+                        secretion_active_slots: 0,
+                        uptake_rate_sum: 1.0,
+                        secretion_rate_sum: 0.0,
+                        interpretation: "cross_feeding_candidate".to_string(),
+                    },
+                ],
+            }),
+        );
+        let analyses = vec![baseline, byproduct];
+        let mut runs = analyses
+            .iter()
+            .map(RunComparisonEntry::from_analysis)
+            .collect::<Vec<_>>();
+
+        let warnings = apply_byproduct_baseline_adjustment(&analyses, &mut runs);
+
+        assert!(warnings.is_empty());
+        assert_eq!(runs[1].byproduct_retained_fraction, Some(109.5));
+        assert_eq!(runs[1].byproduct_excess_final_pool, Some(0.5));
+        assert!((runs[1].byproduct_excess_retained_fraction.unwrap() - 0.5).abs() < 1e-9);
+        assert_eq!(runs[1].byproduct_cross_feeding_candidates, Some(0));
+        assert_eq!(runs[1].byproduct_public_pool_candidates, Some(0));
+        assert_eq!(
+            runs[1].byproduct_adjusted_species[1].adjusted_interpretation,
+            "trace_byproduct"
         );
     }
 
@@ -3937,6 +4322,63 @@ mod tests {
         assert_eq!(runs[2].byproduct_excess_retained_fraction, Some(0.6));
         assert_eq!(runs[3].byproduct_excess_final_pool, Some(15.0));
         assert_eq!(runs[3].byproduct_excess_retained_fraction, Some(0.75));
+    }
+
+    #[test]
+    fn comparison_summarizes_paired_byproduct_population_effects() {
+        let run = |name: &str,
+                   seed: u64,
+                   byproduct_amount: f64,
+                   final_population: u64,
+                   growth_factor: f64,
+                   final_avg_energy: f64|
+         -> RunComparisonEntry {
+            RunComparisonEntry {
+                name: name.to_string(),
+                run_dir: PathBuf::from(format!("/tmp/{name}")),
+                rng_seed: Some(seed),
+                final_population: Some(final_population),
+                max_population: Some(final_population),
+                growth_factor: Some(growth_factor),
+                final_avg_energy: Some(final_avg_energy),
+                top_fraction: None,
+                middle_fraction: None,
+                deep_fraction: None,
+                genotype_unique_count: None,
+                genotype_dominant_fraction: None,
+                transporter_active_per_cell: None,
+                transporter_gated_slots: None,
+                stoich_total_events: Some(1),
+                stoich_imbalanced_events: Some(0),
+                reaction_byproduct_events: Some((byproduct_amount > 0.0) as u64),
+                reaction_byproduct_amount: Some(byproduct_amount),
+                reaction_leakage_events: Some(0),
+                reaction_leakage_energy_to_heat: Some(0.0),
+                byproduct_final_pool: None,
+                byproduct_retained_fraction: None,
+                byproduct_signed_excess_final_pool: None,
+                byproduct_signed_excess_retained_fraction: None,
+                byproduct_excess_final_pool: None,
+                byproduct_excess_retained_fraction: Some(0.25),
+                byproduct_cross_feeding_candidates: Some(0),
+                byproduct_public_pool_candidates: Some(0),
+                byproduct_adjusted_species: Vec::new(),
+            }
+        };
+        let runs = vec![
+            run("s1_byp000", 41001, 0.0, 100, 10.0, 0.5),
+            run("s1_byp008", 41001, 8.0, 125, 12.5, 0.6),
+        ];
+
+        let pairs = summarize_paired_byproduct_population(&runs);
+
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(pairs[0].baseline_name, "s1_byp000");
+        assert_eq!(pairs[0].run_name, "s1_byp008");
+        assert_eq!(pairs[0].delta_final_population, Some(25));
+        assert_eq!(pairs[0].final_population_ratio, Some(1.25));
+        assert_eq!(pairs[0].delta_growth_factor, Some(2.5));
+        assert_eq!(pairs[0].delta_final_avg_energy, Some(0.09999999999999998));
     }
 
     #[test]

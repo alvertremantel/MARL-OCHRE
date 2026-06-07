@@ -169,9 +169,26 @@ model stable.
   48x48x24 checked-config smoke confirmed the configs parse, use the recorded
   seed, produce compact v2 summaries without event CSV, and remain analyzable by
   `marl-analyze`.
+- Calibration readout hardening: `marl-analyze compare` now reports signed and
+  clipped same-seed excess byproduct pools, reclassifies compare-level
+  uptake-pressure/public-pool candidates from baseline-adjusted per-species
+  excess rather than gross final pools, and includes paired population deltas
+  against each seed's zero-byproduct baseline. The current uptake-pressure flag
+  is explicitly a proxy, not direct proof of cross-feeding.
+- First 48x48x24 calibration subset: seed 41001 completed for zero, low
+  (`0.02`), default (`0.08`), and high (`0.25`) byproduct strengths through 801
+  ticks. Low strength ended above the paired control (+827 cells) with zero
+  clipped excess retention; default strength ended below control (-939 cells)
+  and showed high clipped excess retention (1.588), almost entirely in organic
+  byproduct; high strength produced the most byproduct but retained little
+  clipped excess (0.053) and ended mildly below control (-448 cells). This is a
+  one-seed result and should be treated as a prompt for the remaining replicated
+  sweep, not a calibrated conclusion.
 
 The next implementation target is the larger replicated byproduct sweep using
 compact v2 summaries by default: run four paired seeds across zero, low,
-default, and high byproduct strengths; inspect excess retention, public-pool and
-cross-feeding candidates, paired population effects, and whether organic
-byproduct accumulation remains low after longer evolutionary time.
+default, and high byproduct strengths; inspect signed/clipped excess retention,
+adjusted public-pool and uptake-pressure candidates, paired population effects,
+and whether organic byproduct accumulation remains low after longer
+evolutionary time. A later analysis slice should add actual transport flux and
+lineage attribution before making cross-feeding claims.
