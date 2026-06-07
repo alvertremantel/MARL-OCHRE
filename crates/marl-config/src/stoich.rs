@@ -7,6 +7,9 @@ pub const STOICH_TOLERANCE: f32 = 1e-4;
 pub const STOICH_STAGE_COUNT: usize = 11;
 pub const STOICH_RESERVOIR_COUNT: usize = 7;
 pub const STOICH_BYPRODUCT_SPECIES_COUNT: usize = S_EXT;
+pub const STOICH_STARTER_TYPE_COUNT: usize = 4;
+pub const STOICH_SPECIES_STARTER_COUNT: usize = S_EXT * STOICH_STARTER_TYPE_COUNT;
+pub const STOICH_STARTER_OTHER: u8 = 3;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -321,8 +324,26 @@ pub struct StoichSpeciesEventSummary {
 }
 
 #[derive(Debug, Clone, Copy, Default, serde::Serialize)]
+pub struct StoichSpeciesStarterEventSummary {
+    pub species_index: i16,
+    pub starter_type: u8,
+    pub amount: f32,
+    pub events: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default, serde::Serialize)]
 pub struct StoichTransportFluxSummary {
     pub species_index: i16,
+    pub uptake_amount: f32,
+    pub uptake_events: u64,
+    pub secretion_amount: f32,
+    pub secretion_events: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default, serde::Serialize)]
+pub struct StoichTransportStarterFluxSummary {
+    pub species_index: i16,
+    pub starter_type: u8,
     pub uptake_amount: f32,
     pub uptake_events: u64,
     pub secretion_amount: f32,
@@ -334,6 +355,7 @@ pub struct StoichRecord {
     pub stage: StoichStage,
     pub kind: StoichEventKind,
     pub actor_id: u64,
+    pub starter_type: u8,
     pub species_index: i16,
     pub template_id: u8,
     pub amount: f32,
@@ -376,6 +398,7 @@ impl StoichRecord {
             stage,
             kind,
             actor_id: 0,
+            starter_type: STOICH_STARTER_OTHER,
             species_index: -1,
             template_id: STRICT_TEMPLATE_NONE,
             amount,
@@ -398,6 +421,11 @@ impl StoichRecord {
 
     pub fn actor(mut self, actor_id: u64) -> Self {
         self.actor_id = actor_id;
+        self
+    }
+
+    pub fn starter(mut self, starter_type: u8) -> Self {
+        self.starter_type = starter_type;
         self
     }
 
@@ -428,8 +456,10 @@ pub struct StoichTickLedger {
     pub reservoir_deltas: [StoichBudgetDelta; STOICH_RESERVOIR_COUNT],
     pub reaction_byproduct: StoichEventKindSummary,
     pub reaction_byproduct_by_species: [StoichSpeciesEventSummary; STOICH_BYPRODUCT_SPECIES_COUNT],
+    pub reaction_byproduct_by_species_starter: Vec<StoichSpeciesStarterEventSummary>,
     pub reaction_leakage: StoichEventKindSummary,
     pub transport_flux_by_species: [StoichTransportFluxSummary; S_EXT],
+    pub transport_flux_by_species_starter: Vec<StoichTransportStarterFluxSummary>,
     pub events: Vec<StoichEvent>,
 }
 
@@ -453,11 +483,31 @@ impl Default for StoichTickLedger {
                 species_index: i as i16,
                 ..StoichSpeciesEventSummary::default()
             }),
+            reaction_byproduct_by_species_starter: (0..STOICH_SPECIES_STARTER_COUNT)
+                .map(|i| {
+                    let (species_index, starter_type) = species_starter_indices(i);
+                    StoichSpeciesStarterEventSummary {
+                        species_index: species_index as i16,
+                        starter_type,
+                        ..StoichSpeciesStarterEventSummary::default()
+                    }
+                })
+                .collect(),
             reaction_leakage: StoichEventKindSummary::default(),
             transport_flux_by_species: std::array::from_fn(|i| StoichTransportFluxSummary {
                 species_index: i as i16,
                 ..StoichTransportFluxSummary::default()
             }),
+            transport_flux_by_species_starter: (0..STOICH_SPECIES_STARTER_COUNT)
+                .map(|i| {
+                    let (species_index, starter_type) = species_starter_indices(i);
+                    StoichTransportStarterFluxSummary {
+                        species_index: species_index as i16,
+                        starter_type,
+                        ..StoichTransportStarterFluxSummary::default()
+                    }
+                })
+                .collect(),
             events: Vec::new(),
         }
     }
@@ -485,22 +535,68 @@ fn add_event_kind_summary(run: &mut StoichEventKindSummary, tick: StoichEventKin
     run.reservoir_energy += tick.reservoir_energy;
 }
 
+pub const fn starter_bucket(starter_type: u8) -> usize {
+    if starter_type < STOICH_STARTER_OTHER {
+        starter_type as usize
+    } else {
+        STOICH_STARTER_OTHER as usize
+    }
+}
+
+const fn species_starter_index(species_index: usize, starter_type: u8) -> usize {
+    species_index * STOICH_STARTER_TYPE_COUNT + starter_bucket(starter_type)
+}
+
+const fn species_starter_indices(index: usize) -> (usize, u8) {
+    (
+        index / STOICH_STARTER_TYPE_COUNT,
+        (index % STOICH_STARTER_TYPE_COUNT) as u8,
+    )
+}
+
 impl StoichTickLedger {
-    pub fn record_transport_uptake(&mut self, species_index: usize, amount: f32) {
+    pub fn record_transport_uptake(&mut self, species_index: usize, starter_type: u8, amount: f32) {
         if amount <= 0.0 || !amount.is_finite() {
+            return;
+        }
+        if species_index >= S_EXT {
             return;
         }
         if let Some(summary) = self.transport_flux_by_species.get_mut(species_index) {
             summary.uptake_amount += amount;
             summary.uptake_events += 1;
         }
+        let starter_index = species_starter_index(species_index, starter_type);
+        if let Some(summary) = self
+            .transport_flux_by_species_starter
+            .get_mut(starter_index)
+        {
+            summary.uptake_amount += amount;
+            summary.uptake_events += 1;
+        }
     }
 
-    pub fn record_transport_secretion(&mut self, species_index: usize, amount: f32) {
+    pub fn record_transport_secretion(
+        &mut self,
+        species_index: usize,
+        starter_type: u8,
+        amount: f32,
+    ) {
         if amount <= 0.0 || !amount.is_finite() {
             return;
         }
+        if species_index >= S_EXT {
+            return;
+        }
         if let Some(summary) = self.transport_flux_by_species.get_mut(species_index) {
+            summary.secretion_amount += amount;
+            summary.secretion_events += 1;
+        }
+        let starter_index = species_starter_index(species_index, starter_type);
+        if let Some(summary) = self
+            .transport_flux_by_species_starter
+            .get_mut(starter_index)
+        {
             summary.secretion_amount += amount;
             summary.secretion_events += 1;
         }
@@ -546,6 +642,18 @@ impl StoichTickLedger {
                 {
                     summary.amount += record.amount;
                     summary.events += 1;
+                }
+                if let Ok(species) = usize::try_from(record.species_index)
+                    && species < S_EXT
+                {
+                    let starter_index = species_starter_index(species, record.starter_type);
+                    if let Some(summary) = self
+                        .reaction_byproduct_by_species_starter
+                        .get_mut(starter_index)
+                    {
+                        summary.amount += record.amount;
+                        summary.events += 1;
+                    }
                 }
             }
             StoichEventKind::ReactionLeakage => record_event_kind_summary(
@@ -714,8 +822,10 @@ pub struct StoichRunLedger {
     pub reservoir_deltas: [StoichBudgetDelta; STOICH_RESERVOIR_COUNT],
     pub reaction_byproduct: StoichEventKindSummary,
     pub reaction_byproduct_by_species: [StoichSpeciesEventSummary; STOICH_BYPRODUCT_SPECIES_COUNT],
+    pub reaction_byproduct_by_species_starter: Vec<StoichSpeciesStarterEventSummary>,
     pub reaction_leakage: StoichEventKindSummary,
     pub transport_flux_by_species: [StoichTransportFluxSummary; S_EXT],
+    pub transport_flux_by_species_starter: Vec<StoichTransportStarterFluxSummary>,
 }
 
 impl Default for StoichRunLedger {
@@ -739,11 +849,31 @@ impl Default for StoichRunLedger {
                 species_index: i as i16,
                 ..StoichSpeciesEventSummary::default()
             }),
+            reaction_byproduct_by_species_starter: (0..STOICH_SPECIES_STARTER_COUNT)
+                .map(|i| {
+                    let (species_index, starter_type) = species_starter_indices(i);
+                    StoichSpeciesStarterEventSummary {
+                        species_index: species_index as i16,
+                        starter_type,
+                        ..StoichSpeciesStarterEventSummary::default()
+                    }
+                })
+                .collect(),
             reaction_leakage: StoichEventKindSummary::default(),
             transport_flux_by_species: std::array::from_fn(|i| StoichTransportFluxSummary {
                 species_index: i as i16,
                 ..StoichTransportFluxSummary::default()
             }),
+            transport_flux_by_species_starter: (0..STOICH_SPECIES_STARTER_COUNT)
+                .map(|i| {
+                    let (species_index, starter_type) = species_starter_indices(i);
+                    StoichTransportStarterFluxSummary {
+                        species_index: species_index as i16,
+                        starter_type,
+                        ..StoichTransportStarterFluxSummary::default()
+                    }
+                })
+                .collect(),
         }
     }
 }
@@ -783,11 +913,29 @@ impl StoichRunLedger {
             run.amount += tick.amount;
             run.events += tick.events;
         }
+        for (run, tick) in self
+            .reaction_byproduct_by_species_starter
+            .iter_mut()
+            .zip(tick.reaction_byproduct_by_species_starter.iter().copied())
+        {
+            run.amount += tick.amount;
+            run.events += tick.events;
+        }
         add_event_kind_summary(&mut self.reaction_leakage, tick.reaction_leakage);
         for (run, tick) in self
             .transport_flux_by_species
             .iter_mut()
             .zip(tick.transport_flux_by_species)
+        {
+            run.uptake_amount += tick.uptake_amount;
+            run.uptake_events += tick.uptake_events;
+            run.secretion_amount += tick.secretion_amount;
+            run.secretion_events += tick.secretion_events;
+        }
+        for (run, tick) in self
+            .transport_flux_by_species_starter
+            .iter_mut()
+            .zip(tick.transport_flux_by_species_starter.iter().copied())
         {
             run.uptake_amount += tick.uptake_amount;
             run.uptake_events += tick.uptake_events;
@@ -1321,13 +1469,13 @@ mod tests {
         let mut run = StoichRunLedger::default();
 
         let mut tick_a = StoichTickLedger::default();
-        tick_a.record_transport_uptake(3, 1.5);
-        tick_a.record_transport_secretion(3, 0.25);
+        tick_a.record_transport_uptake(3, 0, 1.5);
+        tick_a.record_transport_secretion(3, 0, 0.25);
         run.add_tick(&tick_a);
 
         let mut tick_b = StoichTickLedger::default();
-        tick_b.record_transport_uptake(3, 0.5);
-        tick_b.record_transport_secretion(4, 2.0);
+        tick_b.record_transport_uptake(3, 2, 0.5);
+        tick_b.record_transport_secretion(4, 99, 2.0);
         run.add_tick(&tick_b);
 
         let carbon = run.transport_flux_by_species[3];
@@ -1342,6 +1490,50 @@ mod tests {
         assert_eq!(organic.uptake_events, 0);
         assert!((organic.secretion_amount - 2.0).abs() < f32::EPSILON);
         assert_eq!(organic.secretion_events, 1);
+
+        let carbon_starter0 = run.transport_flux_by_species_starter[species_starter_index(3, 0)];
+        assert_eq!(carbon_starter0.starter_type, 0);
+        assert!((carbon_starter0.uptake_amount - 1.5).abs() < f32::EPSILON);
+        assert_eq!(carbon_starter0.uptake_events, 1);
+        assert!((carbon_starter0.secretion_amount - 0.25).abs() < f32::EPSILON);
+        assert_eq!(carbon_starter0.secretion_events, 1);
+
+        let carbon_starter2 = run.transport_flux_by_species_starter[species_starter_index(3, 2)];
+        assert_eq!(carbon_starter2.starter_type, 2);
+        assert!((carbon_starter2.uptake_amount - 0.5).abs() < f32::EPSILON);
+        assert_eq!(carbon_starter2.uptake_events, 1);
+
+        let organic_other =
+            run.transport_flux_by_species_starter[species_starter_index(4, STOICH_STARTER_OTHER)];
+        assert_eq!(organic_other.starter_type, STOICH_STARTER_OTHER);
+        assert!((organic_other.secretion_amount - 2.0).abs() < f32::EPSILON);
+        assert_eq!(organic_other.secretion_events, 1);
+    }
+
+    #[test]
+    fn reaction_byproduct_records_species_and_starter_producer() {
+        let mut tick = StoichTickLedger::default();
+        tick.record(
+            StoichRecord::new(
+                StoichStage::Reactions,
+                StoichEventKind::ReactionByproduct,
+                1.25,
+            )
+            .model_delta(transfer_delta(4, 4, -1.25))
+            .species(4)
+            .starter(2),
+            false,
+        );
+
+        assert!((tick.reaction_byproduct.amount - 1.25).abs() < f32::EPSILON);
+        assert_eq!(tick.reaction_byproduct_by_species[4].events, 1);
+        assert!((tick.reaction_byproduct_by_species[4].amount - 1.25).abs() < f32::EPSILON);
+
+        let starter = tick.reaction_byproduct_by_species_starter[species_starter_index(4, 2)];
+        assert_eq!(starter.species_index, 4);
+        assert_eq!(starter.starter_type, 2);
+        assert_eq!(starter.events, 1);
+        assert!((starter.amount - 1.25).abs() < f32::EPSILON);
     }
 
     #[test]

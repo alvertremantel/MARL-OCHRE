@@ -4,7 +4,8 @@ use std::f64::consts::E;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use marl_config::{ChemicalComposition, external_species_descriptor};
+use marl_config::stoich::STOICH_STARTER_TYPE_COUNT;
+use marl_config::{ChemicalComposition, S_EXT, external_species_descriptor};
 use marl_format::{
     RULESET_FULL_CANONICAL_SIZE, RULESET_FULL_CELL_REF_STRIDE, RULESET_FULL_FORMAT_VERSION,
     RULESET_FULL_HEADER_SIZE, RULESET_FULL_MAGIC, RunMeta,
@@ -16,6 +17,9 @@ use marl_viewer_core::io::{
 use serde::Serialize;
 
 pub type AnalysisResult<T> = Result<T, Box<dyn Error>>;
+
+const STOICH_COMPACT_MERGE_REL_TOLERANCE: f64 = 1.0e-6;
+const STOICH_EVENT_CSV_AMOUNT_DECIMALS: f64 = 1.0e-6;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScanMode {
@@ -348,10 +352,12 @@ pub struct StoichV2Analysis {
     pub reaction_byproduct_model_abs: f64,
     pub reaction_byproduct_residual_abs: f64,
     pub reaction_byproduct_by_species: Vec<StoichSpeciesEventSummary>,
+    pub reaction_byproduct_by_species_starter: Vec<StoichSpeciesStarterEventSummary>,
     pub reaction_leakage_events: u64,
     pub reaction_leakage_amount: f64,
     pub reaction_leakage_energy_to_heat: f64,
     pub transport_flux_by_species: Vec<StoichTransportFluxSummary>,
+    pub transport_flux_by_species_starter: Vec<StoichTransportStarterFluxSummary>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -362,8 +368,26 @@ pub struct StoichSpeciesEventSummary {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct StoichSpeciesStarterEventSummary {
+    pub species_index: i16,
+    pub starter_type: u8,
+    pub amount: f64,
+    pub events: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct StoichTransportFluxSummary {
     pub species_index: i16,
+    pub uptake_amount: f64,
+    pub uptake_events: u64,
+    pub secretion_amount: f64,
+    pub secretion_events: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct StoichTransportStarterFluxSummary {
+    pub species_index: i16,
+    pub starter_type: u8,
     pub uptake_amount: f64,
     pub uptake_events: u64,
     pub secretion_amount: f64,
@@ -414,7 +438,9 @@ struct StoichV2EventAccumulator {
     byproduct: StoichEventKindAccumulator,
     leakage: StoichEventKindAccumulator,
     byproduct_by_species: HashMap<i16, StoichSpeciesEventSummary>,
+    byproduct_by_species_starter: HashMap<(i16, u8), StoichSpeciesStarterEventSummary>,
     transport_flux_by_species: HashMap<i16, StoichTransportFluxSummary>,
+    transport_flux_by_species_starter: HashMap<(i16, u8), StoichTransportStarterFluxSummary>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -846,8 +872,18 @@ pub fn render_run_terminal(analysis: &RunAnalysis) -> String {
                     .join(", ");
                 out.push_str(&format!("  reaction byproducts by species: {species}\n"));
             }
+            if let Some(producers) =
+                format_byproduct_starter_rows(&stoich.reaction_byproduct_by_species_starter, 5)
+            {
+                out.push_str(&format!("  reaction byproduct producers: {producers}\n"));
+            }
             if let Some(fluxes) = format_transport_fluxes(&stoich.transport_flux_by_species, 5) {
                 out.push_str(&format!("  transport flux by species: {fluxes}\n"));
+            }
+            if let Some(fluxes) =
+                format_transport_starter_fluxes(&stoich.transport_flux_by_species_starter, 5)
+            {
+                out.push_str(&format!("  transport flux by starter: {fluxes}\n"));
             }
         } else {
             out.push_str(&format!(
@@ -1143,6 +1179,100 @@ fn format_transport_fluxes(fluxes: &[StoichTransportFluxSummary], limit: usize) 
     )
 }
 
+fn format_byproduct_starter_rows(
+    rows: &[StoichSpeciesStarterEventSummary],
+    limit: usize,
+) -> Option<String> {
+    let mut nonzero = rows
+        .iter()
+        .filter(|row| row.amount > 0.0 || row.events > 0)
+        .collect::<Vec<_>>();
+    nonzero.sort_by(|left, right| {
+        right
+            .amount
+            .partial_cmp(&left.amount)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.species_index.cmp(&right.species_index))
+            .then_with(|| left.starter_type.cmp(&right.starter_type))
+    });
+    if nonzero.is_empty() {
+        return None;
+    }
+    Some(
+        nonzero
+            .into_iter()
+            .take(limit)
+            .map(|row| {
+                let name = usize::try_from(row.species_index)
+                    .ok()
+                    .map(external_species_descriptor)
+                    .map(|descriptor| descriptor.name)
+                    .unwrap_or("unknown");
+                format!(
+                    "ext{}({}) {}:{:.4}/{}",
+                    row.species_index,
+                    name,
+                    starter_label(row.starter_type),
+                    row.amount,
+                    row.events
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", "),
+    )
+}
+
+fn format_transport_starter_fluxes(
+    fluxes: &[StoichTransportStarterFluxSummary],
+    limit: usize,
+) -> Option<String> {
+    let mut nonzero = fluxes
+        .iter()
+        .filter(|flux| {
+            flux.uptake_amount > 0.0
+                || flux.secretion_amount > 0.0
+                || flux.uptake_events > 0
+                || flux.secretion_events > 0
+        })
+        .collect::<Vec<_>>();
+    nonzero.sort_by(|left, right| {
+        let left_total = left.uptake_amount + left.secretion_amount;
+        let right_total = right.uptake_amount + right.secretion_amount;
+        right_total
+            .partial_cmp(&left_total)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.species_index.cmp(&right.species_index))
+            .then_with(|| left.starter_type.cmp(&right.starter_type))
+    });
+    if nonzero.is_empty() {
+        return None;
+    }
+    Some(
+        nonzero
+            .into_iter()
+            .take(limit)
+            .map(|flux| {
+                let name = usize::try_from(flux.species_index)
+                    .ok()
+                    .map(external_species_descriptor)
+                    .map(|descriptor| descriptor.name)
+                    .unwrap_or("unknown");
+                format!(
+                    "ext{}({}) {}: uptake {:.4}/{} secretion {:.4}/{}",
+                    flux.species_index,
+                    name,
+                    starter_label(flux.starter_type),
+                    flux.uptake_amount,
+                    flux.uptake_events,
+                    flux.secretion_amount,
+                    flux.secretion_events
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", "),
+    )
+}
+
 pub fn render_run_markdown(analysis: &RunAnalysis) -> String {
     let mut out = String::new();
     out.push_str(&format!(
@@ -1404,6 +1534,31 @@ pub fn render_run_markdown(analysis: &RunAnalysis) -> String {
                     ));
                 }
             }
+            let byproduct_starters = stoich
+                .reaction_byproduct_by_species_starter
+                .iter()
+                .filter(|row| row.amount > 0.0 || row.events > 0)
+                .collect::<Vec<_>>();
+            if !byproduct_starters.is_empty() {
+                out.push_str("\n### Reaction Byproduct Producers By Starter\n\n");
+                out.push_str("| species | name | starter | events | amount |\n");
+                out.push_str("|---:|---|---|---:|---:|\n");
+                for row in byproduct_starters {
+                    let name = usize::try_from(row.species_index)
+                        .ok()
+                        .map(external_species_descriptor)
+                        .map(|descriptor| descriptor.name)
+                        .unwrap_or("unknown");
+                    out.push_str(&format!(
+                        "| {} | {} | {} | {} | {:.6} |\n",
+                        row.species_index,
+                        name,
+                        starter_label(row.starter_type),
+                        row.events,
+                        row.amount
+                    ));
+                }
+            }
             let transport_fluxes = stoich
                 .transport_flux_by_species
                 .iter()
@@ -1428,6 +1583,39 @@ pub fn render_run_markdown(analysis: &RunAnalysis) -> String {
                         "| {} | {} | {} | {:.6} | {} | {:.6} | {:.6} |\n",
                         flux.species_index,
                         name,
+                        flux.uptake_events,
+                        flux.uptake_amount,
+                        flux.secretion_events,
+                        flux.secretion_amount,
+                        flux.uptake_amount - flux.secretion_amount
+                    ));
+                }
+            }
+            let transport_starters = stoich
+                .transport_flux_by_species_starter
+                .iter()
+                .filter(|flux| {
+                    flux.uptake_amount > 0.0
+                        || flux.secretion_amount > 0.0
+                        || flux.uptake_events > 0
+                        || flux.secretion_events > 0
+                })
+                .collect::<Vec<_>>();
+            if !transport_starters.is_empty() {
+                out.push_str("\n### Transport Flux By Species And Starter\n\n");
+                out.push_str("| species | name | starter | uptake_events | uptake_amount | secretion_events | secretion_amount | net_uptake |\n");
+                out.push_str("|---:|---|---|---:|---:|---:|---:|---:|\n");
+                for flux in transport_starters {
+                    let name = usize::try_from(flux.species_index)
+                        .ok()
+                        .map(external_species_descriptor)
+                        .map(|descriptor| descriptor.name)
+                        .unwrap_or("unknown");
+                    out.push_str(&format!(
+                        "| {} | {} | {} | {} | {:.6} | {} | {:.6} | {:.6} |\n",
+                        flux.species_index,
+                        name,
+                        starter_label(flux.starter_type),
                         flux.uptake_events,
                         flux.uptake_amount,
                         flux.secretion_events,
@@ -1738,7 +1926,17 @@ fn read_stoich_v2_analysis(run_dir: &Path) -> AnalysisResult<Option<StoichV2Anal
     let accumulator = if csv_events_present {
         let mut accumulator = parse_stoich_v2_events(&fs::read_to_string(&events_path)?)?;
         if let Some(summary_accumulator) = summary_accumulator {
+            if stoich_amounts_match(
+                accumulator.byproduct.amount,
+                summary_accumulator.byproduct.amount,
+                accumulator.byproduct.events,
+            ) {
+                accumulator.byproduct_by_species_starter =
+                    summary_accumulator.byproduct_by_species_starter;
+            }
             accumulator.transport_flux_by_species = summary_accumulator.transport_flux_by_species;
+            accumulator.transport_flux_by_species_starter =
+                summary_accumulator.transport_flux_by_species_starter;
         }
         accumulator
     } else {
@@ -1750,11 +1948,23 @@ fn read_stoich_v2_analysis(run_dir: &Path) -> AnalysisResult<Option<StoichV2Anal
         .into_values()
         .collect::<Vec<_>>();
     byproduct_by_species.sort_by_key(|summary| summary.species_index);
+    let mut byproduct_by_species_starter = accumulator
+        .byproduct_by_species_starter
+        .into_values()
+        .collect::<Vec<_>>();
+    byproduct_by_species_starter
+        .sort_by_key(|summary| (summary.species_index, summary.starter_type));
     let mut transport_flux_by_species = accumulator
         .transport_flux_by_species
         .into_values()
         .collect::<Vec<_>>();
     transport_flux_by_species.sort_by_key(|summary| summary.species_index);
+    let mut transport_flux_by_species_starter = accumulator
+        .transport_flux_by_species_starter
+        .into_values()
+        .collect::<Vec<_>>();
+    transport_flux_by_species_starter
+        .sort_by_key(|summary| (summary.species_index, summary.starter_type));
 
     Ok(Some(StoichV2Analysis {
         summary_present,
@@ -1769,11 +1979,33 @@ fn read_stoich_v2_analysis(run_dir: &Path) -> AnalysisResult<Option<StoichV2Anal
         reaction_byproduct_model_abs: accumulator.byproduct.model_abs,
         reaction_byproduct_residual_abs: accumulator.byproduct.residual_abs,
         reaction_byproduct_by_species: byproduct_by_species,
+        reaction_byproduct_by_species_starter: byproduct_by_species_starter,
         reaction_leakage_events: accumulator.leakage.events,
         reaction_leakage_amount: accumulator.leakage.amount,
         reaction_leakage_energy_to_heat: accumulator.leakage.reservoir_energy,
         transport_flux_by_species,
+        transport_flux_by_species_starter,
     }))
+}
+
+fn stoich_amounts_match(left: f64, right: f64, rounded_event_count: u64) -> bool {
+    let scale = left.abs().max(right.abs()).max(1.0);
+    let relative_slack = STOICH_COMPACT_MERGE_REL_TOLERANCE * scale;
+    let csv_rounding_slack = 0.5 * STOICH_EVENT_CSV_AMOUNT_DECIMALS * rounded_event_count as f64;
+    (left - right).abs() <= relative_slack + csv_rounding_slack
+}
+
+fn parse_summary_species_index(entry: &serde_json::Value) -> Option<i16> {
+    let raw = entry.get("species_index")?.as_i64()?;
+    let species_index = i16::try_from(raw).ok()?;
+    let species = usize::try_from(species_index).ok()?;
+    (species < S_EXT).then_some(species_index)
+}
+
+fn parse_summary_starter_type(entry: &serde_json::Value) -> Option<u8> {
+    let raw = entry.get("starter_type")?.as_u64()?;
+    let starter_type = u8::try_from(raw).ok()?;
+    (usize::from(starter_type) < STOICH_STARTER_TYPE_COUNT).then_some(starter_type)
 }
 
 fn parse_stoich_v2_summary_accumulator(
@@ -1855,10 +2087,9 @@ fn parse_stoich_v2_summary_accumulator(
             if events == 0 {
                 continue;
             }
-            let species_index = entry
-                .get("species_index")
-                .and_then(|value| value.as_i64())
-                .unwrap_or(-1) as i16;
+            let Some(species_index) = parse_summary_species_index(entry) else {
+                continue;
+            };
             accumulator.byproduct_by_species.insert(
                 species_index,
                 StoichSpeciesEventSummary {
@@ -1867,6 +2098,39 @@ fn parse_stoich_v2_summary_accumulator(
                         .get("amount")
                         .and_then(|value| value.as_f64())
                         .unwrap_or(0.0),
+                    events,
+                },
+            );
+        }
+    }
+
+    if let Some(species) = ledger
+        .get("reaction_byproduct_by_species_starter")
+        .and_then(|value| value.as_array())
+    {
+        for entry in species {
+            let Some(events) = entry.get("events").and_then(|value| value.as_u64()) else {
+                continue;
+            };
+            let amount = entry
+                .get("amount")
+                .and_then(|value| value.as_f64())
+                .unwrap_or(0.0);
+            if events == 0 && amount == 0.0 {
+                continue;
+            }
+            let Some(species_index) = parse_summary_species_index(entry) else {
+                continue;
+            };
+            let Some(starter_type) = parse_summary_starter_type(entry) else {
+                continue;
+            };
+            accumulator.byproduct_by_species_starter.insert(
+                (species_index, starter_type),
+                StoichSpeciesStarterEventSummary {
+                    species_index,
+                    starter_type,
+                    amount,
                     events,
                 },
             );
@@ -1901,14 +2165,61 @@ fn parse_stoich_v2_summary_accumulator(
             {
                 continue;
             }
-            let species_index = entry
-                .get("species_index")
-                .and_then(|value| value.as_i64())
-                .unwrap_or(-1) as i16;
+            let Some(species_index) = parse_summary_species_index(entry) else {
+                continue;
+            };
             accumulator.transport_flux_by_species.insert(
                 species_index,
                 StoichTransportFluxSummary {
                     species_index,
+                    uptake_amount,
+                    uptake_events,
+                    secretion_amount,
+                    secretion_events,
+                },
+            );
+        }
+    }
+
+    if let Some(species) = ledger
+        .get("transport_flux_by_species_starter")
+        .and_then(|value| value.as_array())
+    {
+        for entry in species {
+            let uptake_events = entry
+                .get("uptake_events")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0);
+            let secretion_events = entry
+                .get("secretion_events")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0);
+            let uptake_amount = entry
+                .get("uptake_amount")
+                .and_then(|value| value.as_f64())
+                .unwrap_or(0.0);
+            let secretion_amount = entry
+                .get("secretion_amount")
+                .and_then(|value| value.as_f64())
+                .unwrap_or(0.0);
+            if uptake_events == 0
+                && secretion_events == 0
+                && uptake_amount == 0.0
+                && secretion_amount == 0.0
+            {
+                continue;
+            }
+            let Some(species_index) = parse_summary_species_index(entry) else {
+                continue;
+            };
+            let Some(starter_type) = parse_summary_starter_type(entry) else {
+                continue;
+            };
+            accumulator.transport_flux_by_species_starter.insert(
+                (species_index, starter_type),
+                StoichTransportStarterFluxSummary {
+                    species_index,
+                    starter_type,
                     uptake_amount,
                     uptake_events,
                     secretion_amount,
@@ -4382,6 +4693,8 @@ mod tests {
             reaction_leakage_amount: 0.0,
             reaction_leakage_energy_to_heat: 0.0,
             transport_flux_by_species: Vec::new(),
+            reaction_byproduct_by_species_starter: Vec::new(),
+            transport_flux_by_species_starter: Vec::new(),
         }
     }
 
@@ -4407,6 +4720,8 @@ mod tests {
             reaction_leakage_amount: 0.0,
             reaction_leakage_energy_to_heat: 0.0,
             transport_flux_by_species: Vec::new(),
+            reaction_byproduct_by_species_starter: Vec::new(),
+            transport_flux_by_species_starter: Vec::new(),
         }
     }
 
@@ -4472,6 +4787,8 @@ mod tests {
                 reaction_leakage_amount: 0.0,
                 reaction_leakage_energy_to_heat: 0.0,
                 transport_flux_by_species: Vec::new(),
+                reaction_byproduct_by_species_starter: Vec::new(),
+                transport_flux_by_species_starter: Vec::new(),
             }),
             None,
         );
@@ -4507,6 +4824,8 @@ mod tests {
                 reaction_leakage_amount: 0.0,
                 reaction_leakage_energy_to_heat: 0.0,
                 transport_flux_by_species: Vec::new(),
+                reaction_byproduct_by_species_starter: Vec::new(),
+                transport_flux_by_species_starter: Vec::new(),
             }),
             Some(ByproductCalibrationSummary {
                 total_byproduct_amount: 20.0,
@@ -4609,6 +4928,8 @@ mod tests {
                 reaction_leakage_amount: 0.0,
                 reaction_leakage_energy_to_heat: 0.0,
                 transport_flux_by_species: Vec::new(),
+                reaction_byproduct_by_species_starter: Vec::new(),
+                transport_flux_by_species_starter: Vec::new(),
             }),
             Some(ByproductCalibrationSummary {
                 total_byproduct_amount: 1.000000001,
@@ -4976,6 +5297,8 @@ mod tests {
                 reaction_leakage_amount: 0.0,
                 reaction_leakage_energy_to_heat: 0.0,
                 transport_flux_by_species: Vec::new(),
+                reaction_byproduct_by_species_starter: Vec::new(),
+                transport_flux_by_species_starter: Vec::new(),
             }),
             None,
         );
@@ -5011,6 +5334,8 @@ mod tests {
                 reaction_leakage_amount: 0.0,
                 reaction_leakage_energy_to_heat: 0.0,
                 transport_flux_by_species: Vec::new(),
+                reaction_byproduct_by_species_starter: Vec::new(),
+                transport_flux_by_species_starter: Vec::new(),
             }),
             Some(ByproductCalibrationSummary {
                 total_byproduct_amount: 20.0,
@@ -5083,6 +5408,8 @@ mod tests {
             reaction_leakage_amount: 0.0,
             reaction_leakage_energy_to_heat: 0.0,
             transport_flux_by_species: Vec::new(),
+            reaction_byproduct_by_species_starter: Vec::new(),
+            transport_flux_by_species_starter: Vec::new(),
         };
         let chemistry = SnapshotChemistry {
             tick: 20,
@@ -5188,6 +5515,8 @@ mod tests {
             reaction_leakage_amount: 0.0,
             reaction_leakage_energy_to_heat: 0.0,
             transport_flux_by_species: Vec::new(),
+            reaction_byproduct_by_species_starter: Vec::new(),
+            transport_flux_by_species_starter: Vec::new(),
         };
         let chemistry = SnapshotChemistry {
             tick: 9,
@@ -5274,6 +5603,8 @@ mod tests {
                 reaction_leakage_amount: summary.leakage.amount,
                 reaction_leakage_energy_to_heat: summary.leakage.reservoir_energy,
                 transport_flux_by_species: Vec::new(),
+                reaction_byproduct_by_species_starter: Vec::new(),
+                transport_flux_by_species_starter: Vec::new(),
             }),
             byproduct_calibration: None,
             findings: Vec::new(),
@@ -5368,7 +5699,13 @@ mod tests {
                     },
                     "reaction_byproduct_by_species": [
                         { "species_index": 0, "amount": 0.0, "events": 0 },
-                        { "species_index": 4, "amount": 1.25, "events": 3 }
+                        { "species_index": 4, "amount": 1.25, "events": 3 },
+                        { "species_index": 70000, "amount": 99.0, "events": 1 }
+                    ],
+                    "reaction_byproduct_by_species_starter": [
+                        { "species_index": 4, "starter_type": 1, "amount": 1.25, "events": 3 },
+                        { "species_index": 4, "starter_type": 99, "amount": 99.0, "events": 1 },
+                        { "species_index": 70000, "starter_type": 1, "amount": 99.0, "events": 1 }
                     ],
                     "reaction_leakage": {
                         "events": 2,
@@ -5391,6 +5728,47 @@ mod tests {
                             "uptake_events": 0,
                             "secretion_amount": 1.5,
                             "secretion_events": 3
+                        },
+                        {
+                            "species_index": 70000,
+                            "uptake_amount": 99.0,
+                            "uptake_events": 1,
+                            "secretion_amount": 0.0,
+                            "secretion_events": 0
+                        }
+                    ],
+                    "transport_flux_by_species_starter": [
+                        {
+                            "species_index": 0,
+                            "starter_type": 2,
+                            "uptake_amount": 2.5,
+                            "uptake_events": 4,
+                            "secretion_amount": 0.25,
+                            "secretion_events": 1
+                        },
+                        {
+                            "species_index": 4,
+                            "starter_type": 1,
+                            "uptake_amount": 0.0,
+                            "uptake_events": 0,
+                            "secretion_amount": 1.5,
+                            "secretion_events": 3
+                        },
+                        {
+                            "species_index": 0,
+                            "starter_type": 99,
+                            "uptake_amount": 99.0,
+                            "uptake_events": 1,
+                            "secretion_amount": 0.0,
+                            "secretion_events": 0
+                        },
+                        {
+                            "species_index": 70000,
+                            "starter_type": 1,
+                            "uptake_amount": 99.0,
+                            "uptake_events": 1,
+                            "secretion_amount": 0.0,
+                            "secretion_events": 0
                         }
                     ]
                 },
@@ -5426,6 +5804,12 @@ mod tests {
         assert!((analysis.reaction_byproduct_amount - 1.25).abs() < 1e-9);
         assert_eq!(analysis.reaction_byproduct_by_species.len(), 1);
         assert_eq!(analysis.reaction_byproduct_by_species[0].species_index, 4);
+        assert_eq!(analysis.reaction_byproduct_by_species_starter.len(), 1);
+        assert_eq!(
+            analysis.reaction_byproduct_by_species_starter[0].starter_type,
+            1
+        );
+        assert!((analysis.reaction_byproduct_by_species_starter[0].amount - 1.25).abs() < 1e-9);
         assert_eq!(analysis.reaction_leakage_events, 2);
         assert!((analysis.reaction_leakage_energy_to_heat - 0.75).abs() < 1e-9);
         assert_eq!(analysis.transport_flux_by_species.len(), 2);
@@ -5435,6 +5819,39 @@ mod tests {
         assert!((analysis.transport_flux_by_species[0].secretion_amount - 0.25).abs() < 1e-9);
         assert_eq!(analysis.transport_flux_by_species[1].species_index, 4);
         assert!((analysis.transport_flux_by_species[1].secretion_amount - 1.5).abs() < 1e-9);
+        assert_eq!(analysis.transport_flux_by_species_starter.len(), 2);
+        assert_eq!(
+            analysis.transport_flux_by_species_starter[0].starter_type,
+            2
+        );
+        assert!((analysis.transport_flux_by_species_starter[0].uptake_amount - 2.5).abs() < 1e-9);
+        assert_eq!(
+            analysis.transport_flux_by_species_starter[1].species_index,
+            4
+        );
+        assert_eq!(
+            analysis.transport_flux_by_species_starter[1].starter_type,
+            1
+        );
+
+        let run = minimal_analysis("summary_stoich_render", Vec::new(), Some(analysis), None);
+        let terminal = render_run_terminal(&run);
+        let markdown = render_run_markdown(&run);
+        assert!(
+            terminal
+                .contains("reaction byproduct producers: ext4(organic) chemolithotroph:1.2500/3")
+        );
+        assert!(terminal.contains(
+            "transport flux by starter: ext0(free_energy) anaerobe: uptake 2.5000/4 secretion 0.2500/1"
+        ));
+        assert!(markdown.contains("### Reaction Byproduct Producers By Starter"));
+        assert!(markdown.contains("### Transport Flux By Species And Starter"));
+        assert!(markdown.contains("| 4 | organic | chemolithotroph | 3 | 1.250000 |"));
+        assert!(
+            markdown.contains(
+                "| 0 | free_energy | anaerobe | 4 | 2.500000 | 1 | 0.250000 | 2.250000 |"
+            )
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -5459,6 +5876,9 @@ mod tests {
                     "reaction_byproduct_by_species": [
                         { "species_index": 4, "amount": 99.0, "events": 99 }
                     ],
+                    "reaction_byproduct_by_species_starter": [
+                        { "species_index": 4, "starter_type": 0, "amount": 99.0, "events": 99 }
+                    ],
                     "reaction_leakage": {
                         "events": 0,
                         "amount": 0.0,
@@ -5469,6 +5889,16 @@ mod tests {
                     "transport_flux_by_species": [
                         {
                             "species_index": 0,
+                            "uptake_amount": 0.125,
+                            "uptake_events": 2,
+                            "secretion_amount": 4.5,
+                            "secretion_events": 7
+                        }
+                    ],
+                    "transport_flux_by_species_starter": [
+                        {
+                            "species_index": 0,
+                            "starter_type": 0,
                             "uptake_amount": 0.125,
                             "uptake_events": 2,
                             "secretion_amount": 4.5,
@@ -5512,6 +5942,7 @@ mod tests {
         assert_eq!(analysis.total_events, 1);
         assert_eq!(analysis.reaction_byproduct_events, 1);
         assert!((analysis.reaction_byproduct_amount - 0.5).abs() < 1e-9);
+        assert_eq!(analysis.reaction_byproduct_by_species_starter.len(), 0);
         assert_eq!(analysis.transport_flux_by_species.len(), 1);
         let flux = &analysis.transport_flux_by_species[0];
         assert_eq!(flux.species_index, 0);
@@ -5519,6 +5950,90 @@ mod tests {
         assert_eq!(flux.uptake_events, 2);
         assert!((flux.secretion_amount - 4.5).abs() < 1e-9);
         assert_eq!(flux.secretion_events, 7);
+        assert_eq!(analysis.transport_flux_by_species_starter.len(), 1);
+        let starter_flux = &analysis.transport_flux_by_species_starter[0];
+        assert_eq!(starter_flux.species_index, 0);
+        assert_eq!(starter_flux.starter_type, 0);
+        assert!((starter_flux.secretion_amount - 4.5).abs() < 1e-9);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stoich_v2_analysis_allows_csv_rounding_when_merging_summary_byproduct_starters() {
+        let dir = test_dir("marl_analysis_csv_summary_rounding_byproduct_starters");
+        fs::write(
+            dir.join("stoich_v2_summary.json"),
+            r#"{
+                "schema_version": 2,
+                "total_ticks": 3,
+                "enforcement": "audit",
+                "ledger": {
+                    "reaction_byproduct": {
+                        "events": 3,
+                        "amount": 0.0000015,
+                        "model_abs": 0.0,
+                        "residual_abs": 0.0,
+                        "reservoir_energy": 0.0
+                    },
+                    "reaction_byproduct_by_species": [
+                        { "species_index": 4, "amount": 0.0000015, "events": 3 }
+                    ],
+                    "reaction_byproduct_by_species_starter": [
+                        { "species_index": 4, "starter_type": 2, "amount": 0.0000015, "events": 3 }
+                    ],
+                    "reaction_leakage": {
+                        "events": 0,
+                        "amount": 0.0,
+                        "model_abs": 0.0,
+                        "residual_abs": 0.0,
+                        "reservoir_energy": 0.0
+                    },
+                    "transport_flux_by_species": [],
+                    "transport_flux_by_species_starter": []
+                },
+                "stages": [
+                    {
+                        "stage": "reactions",
+                        "summary": {
+                            "event_count": 3,
+                            "strict_rejection_count": 0,
+                            "imbalanced_event_count": 0,
+                            "gross_model_abs": 0.0,
+                            "gross_reservoir_abs": 0.0,
+                            "gross_residual_abs": 0.0,
+                            "net_model_delta": { "c": 0.0, "h": 0.0, "o": 0.0, "s": 0.0, "redox": 0.0, "energy": 0.0 },
+                            "net_reservoir_delta": { "c": 0.0, "h": 0.0, "o": 0.0, "s": 0.0, "redox": 0.0, "energy": 0.0 }
+                        }
+                    }
+                ],
+                "gross_residual_abs_sum": 0.0
+            }"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.join("stoich_v2_events.csv"),
+            "tick,stage,kind,actor_id,species_index,template_id,amount,model_c,model_h,model_o,model_s,model_redox,model_energy,reservoir_c,reservoir_h,reservoir_o,reservoir_s,reservoir_redox,reservoir_energy,residual_abs,balanced\n\
+0,reactions,reaction_byproduct,7,4,255,0.000001,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,1\n\
+1,reactions,reaction_byproduct,7,4,255,0.000001,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,1\n\
+2,reactions,reaction_byproduct,7,4,255,0.000001,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,0.000000,1\n",
+        )
+        .unwrap();
+
+        let analysis = read_stoich_v2_analysis(&dir)
+            .unwrap()
+            .expect("csv plus same-run rounded summary should be present");
+
+        assert_eq!(analysis.reaction_byproduct_events, 3);
+        assert!((analysis.reaction_byproduct_amount - 0.000003).abs() < 1e-12);
+        assert_eq!(analysis.reaction_byproduct_by_species_starter.len(), 1);
+        assert_eq!(
+            analysis.reaction_byproduct_by_species_starter[0].starter_type,
+            2
+        );
+        assert!(
+            (analysis.reaction_byproduct_by_species_starter[0].amount - 0.0000015).abs() < 1e-12
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }

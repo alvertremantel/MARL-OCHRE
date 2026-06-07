@@ -1096,8 +1096,8 @@ mod tests {
             LegacyReactionAudit::new(3, 0, 15, 0xFF, 2.0).actor(123),
             true,
         );
-        tick.record_transport_uptake(3, 1.5);
-        tick.record_transport_secretion(4, 0.25);
+        tick.record_transport_uptake(3, 0, 1.5);
+        tick.record_transport_secretion(4, 1, 0.25);
 
         logger.log_stoich_tick(7, &tick).unwrap();
         logger.log_stoich_v2_events(7, &tick).unwrap();
@@ -1124,6 +1124,8 @@ mod tests {
         assert!(v2_summary.contains("\"schema_version\": 2"));
         assert!(v2_summary.contains("\"enforcement\": \"audit\""));
         assert!(v2_summary.contains("\"transport_flux_by_species\""));
+        assert!(v2_summary.contains("\"transport_flux_by_species_starter\""));
+        assert!(v2_summary.contains("\"reaction_byproduct_by_species_starter\""));
         assert!(v2_summary.contains("\"uptake_amount\": 1.5"));
         assert!(v2_summary.contains("\"secretion_amount\": 0.25"));
         let v2_events = fs::read_to_string(dir.join("stoich_v2_events.csv")).unwrap();

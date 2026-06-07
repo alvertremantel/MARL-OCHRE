@@ -214,10 +214,23 @@ model stable.
   free-energy uptake; it looks like a general secretion/export side effect or
   extracellular work-currency leakage pattern that deserves longer-run
   attribution.
+- Starter-attributed compact chemistry counters: v2 summaries now include
+  byproduct production and accepted transport flux by `(external species,
+  starter ancestry)` rows. This preserves bounded starter-level producer and
+  transporter attribution without full event logs or unbounded lineage maps.
+  `marl-analyze run` reports the top starter-attributed byproduct producers and
+  transport fluxes in terminal output and writes full tables in Markdown/JSON.
+- Starter-attribution smoke evidence: an 80-tick 48x48x24 seed-41001 default
+  byproduct run reported organic byproduct production entirely under
+  chemolithotroph ancestry in the compact summary. Transport attribution showed
+  phototroph ancestry dominated carbon uptake, while chemolithotroph ancestry
+  dominated oxidant/reductant uptake and organic secretion. This gives the
+  analysis tools their first starter-level candidate producer/transporter
+  context for the byproduct mechanism, though longer paired runs are still
+  needed before treating it as a stable biological story.
 
-The next implementation target is producer/consumer separation for these
-mechanisms: add lineage or starter attribution to compact byproduct and
-transport counters where feasible. Byproduct calibration can now say which
-settings leave adjusted pools behind and which external species are directly
-imported or exported, but it still cannot prove whether one lineage produces a
-pool that another lineage consumes.
+At this point the chemistry plan has a coherent first implementation arc:
+descriptor-driven external chemistry, transport costs, byproduct/leakage
+mechanics, compact calibration counters, direct transport flux evidence, and
+bounded starter-level attribution. The remaining work is review, cleanup, and
+validation rather than starting another feature slice.

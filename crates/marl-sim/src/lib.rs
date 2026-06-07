@@ -1228,6 +1228,13 @@ mod tests {
             flux["uptake_amount"].as_f64().unwrap_or(0.0) > 0.0
                 || flux["secretion_amount"].as_f64().unwrap_or(0.0) > 0.0
         }));
+        let starter_fluxes = summary_json["ledger"]["transport_flux_by_species_starter"]
+            .as_array()
+            .expect("v2 summary should serialize starter-attributed transport counters");
+        assert!(starter_fluxes.iter().any(|flux| {
+            flux["uptake_amount"].as_f64().unwrap_or(0.0) > 0.0
+                || flux["secretion_amount"].as_f64().unwrap_or(0.0) > 0.0
+        }));
         let events = fs::read_to_string(dir.join("stoich_v2_events.csv")).unwrap();
         assert!(events.contains("tick,stage,kind"));
 

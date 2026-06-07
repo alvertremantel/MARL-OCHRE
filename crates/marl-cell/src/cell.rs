@@ -445,7 +445,7 @@ impl CellState {
                 && record_full_stoich
                 && let Some(ledger) = stoich.as_deref_mut()
             {
-                ledger.record_transport_secretion(ext_idx, amount);
+                ledger.record_transport_secretion(ext_idx, self.starter_type, amount);
             }
             if amount > 0.0
                 && record_full_stoich
@@ -478,7 +478,7 @@ impl CellState {
                 && record_full_stoich
                 && let Some(ledger) = stoich.as_deref_mut()
             {
-                ledger.record_transport_uptake(ext_idx, amount);
+                ledger.record_transport_uptake(ext_idx, self.starter_type, amount);
             }
             if amount > 0.0
                 && record_full_stoich
@@ -660,6 +660,7 @@ impl CellState {
                             )
                             .model_delta(transfer_delta(byproduct_species, prod_idx, -byproduct))
                             .actor(self.lineage_id)
+                            .starter(self.starter_type)
                             .species(byproduct_species),
                             keep_stoich_events,
                         );
@@ -1740,6 +1741,7 @@ mod tests {
             ..SimulationConfig::default()
         };
         let mut cell = test_cell(ruleset);
+        cell.starter_type = 2;
         let mut ledger = StoichTickLedger::default();
 
         let (deltas, _) =
@@ -1761,6 +1763,15 @@ mod tests {
         assert!((event.amount - expected_byproduct).abs() < 1e-6);
         assert_eq!(event.species_index, EXT_ORGANIC as i16);
         assert!(event.model_delta.is_near_zero(1e-6));
+        let producer = ledger
+            .reaction_byproduct_by_species_starter
+            .iter()
+            .find(|summary| {
+                summary.species_index == EXT_ORGANIC as i16 && summary.starter_type == 2
+            })
+            .expect("starter-attributed byproduct row should exist");
+        assert_eq!(producer.events, 1);
+        assert!((producer.amount - expected_byproduct).abs() < 1e-6);
     }
 
     #[test]
