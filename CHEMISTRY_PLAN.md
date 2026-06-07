@@ -173,8 +173,10 @@ model stable.
   clipped same-seed excess byproduct pools, reclassifies compare-level
   uptake-pressure/public-pool candidates from baseline-adjusted per-species
   excess rather than gross final pools, and includes paired population deltas
-  against each seed's zero-byproduct baseline. The current uptake-pressure flag
-  is explicitly a proxy, not direct proof of cross-feeding.
+  against each seed's zero-byproduct baseline. It also reports strength-level
+  aggregates with means, sample standard deviations, ranges, sign counts, and
+  warning counts. The current uptake-pressure flag is explicitly a proxy, not
+  direct proof of cross-feeding.
 - First 48x48x24 calibration subset: seed 41001 completed for zero, low
   (`0.02`), default (`0.08`), and high (`0.25`) byproduct strengths through 801
   ticks. Low strength ended above the paired control (+827 cells) with zero
@@ -184,11 +186,24 @@ model stable.
   clipped excess (0.053) and ended mildly below control (-448 cells). This is a
   one-seed result and should be treated as a prompt for the remaining replicated
   sweep, not a calibrated conclusion.
+- Replicated 48x48x24 byproduct sweep: all four seeds completed through 801
+  ticks with compact summaries and no full event CSVs. Seed effects remained
+  large enough that no single strength is a clean population winner: mean paired
+  final-population deltas were +476 for low (`0.02`), +117 for default
+  (`0.08`), and +387 for high (`0.25`), with wide ranges that crossed zero for
+  every strength. If the calibration target is avoiding persistent excess
+  byproduct pools, high strength had the cleanest adjusted retention profile:
+  mean clipped retained fraction 0.014, range 0.000..0.053, and zero high-excess
+  warnings. Low and default each produced high-retention outliers:
+  `s41002_byp002` retained 2.294 and `s41001_byp008`/`s41002_byp008` retained
+  1.588/1.417. However, high strength also produced the most byproduct and had
+  negative signed excess in every seed, so this should be interpreted as strong
+  removal/ecological redistribution rather than proof of a better chemistry.
 
-The next implementation target is the larger replicated byproduct sweep using
-compact v2 summaries by default: run four paired seeds across zero, low,
-default, and high byproduct strengths; inspect signed/clipped excess retention,
-adjusted public-pool and uptake-pressure candidates, paired population effects,
-and whether organic byproduct accumulation remains low after longer
-evolutionary time. A later analysis slice should add actual transport flux and
-lineage attribution before making cross-feeding claims.
+The next implementation target is direct evidence for the mechanisms behind
+signed depletion and clipped accumulation: add transport flux counters by
+external species and, where feasible, lineage or starter attribution for
+producer/consumer separation. Until then, byproduct calibration can say which
+settings leave adjusted pools behind, but not whether those pools are consumed
+by cross-feeding, removed by decay/redistribution, or suppressed by altered
+production.

@@ -71,14 +71,20 @@ cargo run -p marl-analyze --release -- compare \
 Per-seed comparisons can be produced by passing each seed's four directories to
 `marl-analyze compare` with the same `--ticks 0,400,800` flag.
 
+The comparison report includes per-run metrics, baseline-adjusted byproduct
+species rows, paired seed deltas, and strength-level aggregates with means,
+sample standard deviations, ranges, sign counts, and high-excess warning counts.
+
 ## Primary Readouts
 
 - `reaction_byproduct_amount`
 - `reaction_leakage_energy_to_heat`
+- `signed_excess_retained_fraction`
 - `byproduct_excess_retained_fraction`
 - `adjusted_uptake_pressure_candidates`
 - `adjusted_public_pool_candidates`
 - paired final population and growth versus `byp000`
+- strength-level aggregate means, spread, ranges, and sign counts
 
 The uptake-pressure candidate count is an indirect proxy: it means a produced
 byproduct species has low same-seed baseline-adjusted retention and evolved

@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::error::Error;
 use std::f64::consts::E;
 use std::fs;
@@ -65,6 +65,7 @@ pub struct RunAnalysis {
 pub struct ComparisonAnalysis {
     pub runs: Vec<RunComparisonEntry>,
     pub paired_byproduct_population: Vec<ByproductPairedComparison>,
+    pub byproduct_strength_aggregates: Vec<ByproductStrengthAggregate>,
     pub findings: Vec<Finding>,
     pub warnings: Vec<String>,
 }
@@ -126,7 +127,30 @@ pub struct ByproductPairedComparison {
     pub final_population_ratio: Option<f64>,
     pub delta_growth_factor: Option<f64>,
     pub delta_final_avg_energy: Option<f64>,
+    pub byproduct_signed_excess_retained_fraction: Option<f64>,
     pub byproduct_excess_retained_fraction: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ByproductStrengthAggregate {
+    pub label: String,
+    pub run_count: usize,
+    pub mean_byproduct_amount: Option<f64>,
+    pub mean_delta_final_population: Option<f64>,
+    pub sd_delta_final_population: Option<f64>,
+    pub min_delta_final_population: Option<f64>,
+    pub max_delta_final_population: Option<f64>,
+    pub mean_final_population_ratio: Option<f64>,
+    pub mean_delta_growth_factor: Option<f64>,
+    pub mean_delta_final_avg_energy: Option<f64>,
+    pub mean_signed_excess_retained_fraction: Option<f64>,
+    pub mean_clipped_excess_retained_fraction: Option<f64>,
+    pub sd_clipped_excess_retained_fraction: Option<f64>,
+    pub min_clipped_excess_retained_fraction: Option<f64>,
+    pub max_clipped_excess_retained_fraction: Option<f64>,
+    pub positive_population_delta_count: usize,
+    pub positive_signed_excess_count: usize,
+    pub clipped_excess_warning_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -630,10 +654,13 @@ pub fn compare_runs(
         .collect::<Vec<_>>();
     warnings.extend(apply_byproduct_baseline_adjustment(&analyses, &mut runs));
     let paired_byproduct_population = summarize_paired_byproduct_population(&runs);
+    let byproduct_strength_aggregates =
+        summarize_byproduct_strength_aggregates(&paired_byproduct_population);
     let findings = classify_comparison_findings(&runs);
     Ok(ComparisonAnalysis {
         runs,
         paired_byproduct_population,
+        byproduct_strength_aggregates,
         findings,
         warnings,
     })
@@ -949,7 +976,7 @@ pub fn render_comparison_terminal(analysis: &ComparisonAnalysis) -> String {
         out.push_str("  paired byproduct population effects:\n");
         for pair in &analysis.paired_byproduct_population {
             out.push_str(&format!(
-                "    {} vs {}: rng_seed={}, byproduct={}, delta_pop={}, pop_ratio={}, delta_growth={}, delta_energy={}, clipped_excess_retained={}\n",
+                "    {} vs {}: rng_seed={}, byproduct={}, delta_pop={}, pop_ratio={}, delta_growth={}, delta_energy={}, signed_excess_retained={}, clipped_excess_retained={}\n",
                 pair.run_name,
                 pair.baseline_name,
                 pair.rng_seed
@@ -970,9 +997,68 @@ pub fn render_comparison_terminal(analysis: &ComparisonAnalysis) -> String {
                 pair.delta_final_avg_energy
                     .map(|value| format!("{value:.3}"))
                     .unwrap_or_else(|| "n/a".to_string()),
+                pair.byproduct_signed_excess_retained_fraction
+                    .map(|value| format!("{value:.3}"))
+                    .unwrap_or_else(|| "n/a".to_string()),
                 pair.byproduct_excess_retained_fraction
                     .map(|value| format!("{value:.3}"))
                     .unwrap_or_else(|| "n/a".to_string())
+            ));
+        }
+    }
+    if !analysis.byproduct_strength_aggregates.is_empty() {
+        out.push_str("  byproduct strength aggregates:\n");
+        for aggregate in &analysis.byproduct_strength_aggregates {
+            out.push_str(&format!(
+                "    {}: n={}, mean_delta_pop={} sd={} range={}..{}, positive_pop={}/{}, mean_pop_ratio={}, mean_signed_excess_retained={}, positive_signed_excess={}/{}, mean_clipped_excess_retained={} sd={} range={}..{}, excess_warnings={}/{}\n",
+                aggregate.label,
+                aggregate.run_count,
+                aggregate
+                    .mean_delta_final_population
+                    .map(|value| format!("{value:.1}"))
+                    .unwrap_or_else(|| "n/a".to_string()),
+                aggregate
+                    .sd_delta_final_population
+                    .map(|value| format!("{value:.1}"))
+                    .unwrap_or_else(|| "n/a".to_string()),
+                aggregate
+                    .min_delta_final_population
+                    .map(|value| format!("{value:.1}"))
+                    .unwrap_or_else(|| "n/a".to_string()),
+                aggregate
+                    .max_delta_final_population
+                    .map(|value| format!("{value:.1}"))
+                    .unwrap_or_else(|| "n/a".to_string()),
+                aggregate.positive_population_delta_count,
+                aggregate.run_count,
+                aggregate
+                    .mean_final_population_ratio
+                    .map(|value| format!("{value:.3}"))
+                    .unwrap_or_else(|| "n/a".to_string()),
+                aggregate
+                    .mean_signed_excess_retained_fraction
+                    .map(|value| format!("{value:.3}"))
+                    .unwrap_or_else(|| "n/a".to_string()),
+                aggregate.positive_signed_excess_count,
+                aggregate.run_count,
+                aggregate
+                    .mean_clipped_excess_retained_fraction
+                    .map(|value| format!("{value:.3}"))
+                    .unwrap_or_else(|| "n/a".to_string()),
+                aggregate
+                    .sd_clipped_excess_retained_fraction
+                    .map(|value| format!("{value:.3}"))
+                    .unwrap_or_else(|| "n/a".to_string()),
+                aggregate
+                    .min_clipped_excess_retained_fraction
+                    .map(|value| format!("{value:.3}"))
+                    .unwrap_or_else(|| "n/a".to_string()),
+                aggregate
+                    .max_clipped_excess_retained_fraction
+                    .map(|value| format!("{value:.3}"))
+                    .unwrap_or_else(|| "n/a".to_string()),
+                aggregate.clipped_excess_warning_count,
+                aggregate.run_count
             ));
         }
     }
@@ -1424,11 +1510,11 @@ pub fn render_comparison_markdown(analysis: &ComparisonAnalysis) -> String {
     }
     if !analysis.paired_byproduct_population.is_empty() {
         out.push_str("\n## Paired Byproduct Population Effects\n\n");
-        out.push_str("| rng_seed | run | baseline | byproduct_amount | delta_final_pop | final_pop_ratio | delta_growth | delta_final_energy | clipped_excess_retained_fraction |\n");
-        out.push_str("|---:|---|---|---:|---:|---:|---:|---:|---:|\n");
+        out.push_str("| rng_seed | run | baseline | byproduct_amount | delta_final_pop | final_pop_ratio | delta_growth | delta_final_energy | signed_excess_retained_fraction | clipped_excess_retained_fraction |\n");
+        out.push_str("|---:|---|---|---:|---:|---:|---:|---:|---:|---:|\n");
         for pair in &analysis.paired_byproduct_population {
             out.push_str(&format!(
-                "| {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+                "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
                 pair.rng_seed
                     .map(|seed| seed.to_string())
                     .unwrap_or_else(|| "n/a".to_string()),
@@ -1441,7 +1527,41 @@ pub fn render_comparison_markdown(analysis: &ComparisonAnalysis) -> String {
                 display_opt_f64(pair.final_population_ratio),
                 display_opt_f64(pair.delta_growth_factor),
                 display_opt_f64(pair.delta_final_avg_energy),
+                display_opt_f64(pair.byproduct_signed_excess_retained_fraction),
                 display_opt_f64(pair.byproduct_excess_retained_fraction)
+            ));
+        }
+    }
+    if !analysis.byproduct_strength_aggregates.is_empty() {
+        out.push_str("\n## Byproduct Strength Aggregates\n\n");
+        out.push_str("| label | n | mean_byproduct_amount | mean_delta_final_pop | sd_delta_final_pop | delta_final_pop_range | positive_pop_delta | mean_pop_ratio | mean_delta_growth | mean_delta_final_energy | mean_signed_excess_retained | positive_signed_excess | mean_clipped_excess_retained | sd_clipped_excess_retained | clipped_excess_range | clipped_excess_warnings |\n");
+        out.push_str(
+            "|---|---:|---:|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|\n",
+        );
+        for aggregate in &analysis.byproduct_strength_aggregates {
+            out.push_str(&format!(
+                "| {} | {} | {} | {} | {} | {}..{} | {}/{} | {} | {} | {} | {} | {}/{} | {} | {} | {}..{} | {}/{} |\n",
+                aggregate.label,
+                aggregate.run_count,
+                display_opt_f64(aggregate.mean_byproduct_amount),
+                display_opt_f64(aggregate.mean_delta_final_population),
+                display_opt_f64(aggregate.sd_delta_final_population),
+                display_opt_f64(aggregate.min_delta_final_population),
+                display_opt_f64(aggregate.max_delta_final_population),
+                aggregate.positive_population_delta_count,
+                aggregate.run_count,
+                display_opt_f64(aggregate.mean_final_population_ratio),
+                display_opt_f64(aggregate.mean_delta_growth_factor),
+                display_opt_f64(aggregate.mean_delta_final_avg_energy),
+                display_opt_f64(aggregate.mean_signed_excess_retained_fraction),
+                aggregate.positive_signed_excess_count,
+                aggregate.run_count,
+                display_opt_f64(aggregate.mean_clipped_excess_retained_fraction),
+                display_opt_f64(aggregate.sd_clipped_excess_retained_fraction),
+                display_opt_f64(aggregate.min_clipped_excess_retained_fraction),
+                display_opt_f64(aggregate.max_clipped_excess_retained_fraction),
+                aggregate.clipped_excess_warning_count,
+                aggregate.run_count
             ));
         }
     }
@@ -2057,7 +2177,9 @@ fn apply_byproduct_baseline_adjustment(
                 final_field_total: run_total,
                 signed_excess_final_pool: signed_excess,
                 clipped_excess_final_pool: clipped_excess,
-                clipped_excess_retained_fraction: adjusted_retained_fraction,
+                clipped_excess_retained_fraction: meaningful_candidate
+                    .then_some(adjusted_retained_fraction)
+                    .flatten(),
                 adjusted_interpretation: adjusted_interpretation.to_string(),
             });
         }
@@ -2146,11 +2268,148 @@ fn summarize_paired_byproduct_population(
             final_population_ratio,
             delta_growth_factor,
             delta_final_avg_energy,
+            byproduct_signed_excess_retained_fraction: run
+                .byproduct_signed_excess_retained_fraction,
             byproduct_excess_retained_fraction: run.byproduct_excess_retained_fraction,
         });
     }
 
     pairs
+}
+
+fn summarize_byproduct_strength_aggregates(
+    pairs: &[ByproductPairedComparison],
+) -> Vec<ByproductStrengthAggregate> {
+    let mut groups: BTreeMap<String, Vec<&ByproductPairedComparison>> = BTreeMap::new();
+    for pair in pairs {
+        let label = byproduct_strength_label(&pair.run_name);
+        groups.entry(label).or_default().push(pair);
+    }
+
+    groups
+        .into_iter()
+        .map(|(label, pairs)| {
+            let delta_population_stats = summarize_numbers(
+                pairs
+                    .iter()
+                    .filter_map(|pair| pair.delta_final_population.map(|value| value as f64)),
+            );
+            let clipped_retention_stats = summarize_numbers(
+                pairs
+                    .iter()
+                    .filter_map(|pair| pair.byproduct_excess_retained_fraction),
+            );
+            let positive_population_delta_count = pairs
+                .iter()
+                .filter(|pair| pair.delta_final_population.is_some_and(|delta| delta > 0))
+                .count();
+            let positive_signed_excess_count = pairs
+                .iter()
+                .filter(|pair| {
+                    pair.byproduct_signed_excess_retained_fraction
+                        .is_some_and(|fraction| fraction > 0.0)
+                })
+                .count();
+            let clipped_excess_warning_count = pairs
+                .iter()
+                .filter(|pair| {
+                    pair.byproduct_excess_retained_fraction
+                        .is_some_and(|fraction| fraction >= 0.75)
+                })
+                .count();
+            ByproductStrengthAggregate {
+                label,
+                run_count: pairs.len(),
+                mean_byproduct_amount: mean_f64(
+                    pairs.iter().filter_map(|pair| pair.byproduct_amount),
+                ),
+                mean_delta_final_population: delta_population_stats.mean,
+                sd_delta_final_population: delta_population_stats.stddev,
+                min_delta_final_population: delta_population_stats.min,
+                max_delta_final_population: delta_population_stats.max,
+                mean_final_population_ratio: mean_f64(
+                    pairs.iter().filter_map(|pair| pair.final_population_ratio),
+                ),
+                mean_delta_growth_factor: mean_f64(
+                    pairs.iter().filter_map(|pair| pair.delta_growth_factor),
+                ),
+                mean_delta_final_avg_energy: mean_f64(
+                    pairs.iter().filter_map(|pair| pair.delta_final_avg_energy),
+                ),
+                mean_signed_excess_retained_fraction: mean_f64(
+                    pairs
+                        .iter()
+                        .filter_map(|pair| pair.byproduct_signed_excess_retained_fraction),
+                ),
+                mean_clipped_excess_retained_fraction: clipped_retention_stats.mean,
+                sd_clipped_excess_retained_fraction: clipped_retention_stats.stddev,
+                min_clipped_excess_retained_fraction: clipped_retention_stats.min,
+                max_clipped_excess_retained_fraction: clipped_retention_stats.max,
+                positive_population_delta_count,
+                positive_signed_excess_count,
+                clipped_excess_warning_count,
+            }
+        })
+        .collect()
+}
+
+#[derive(Debug, Clone, Copy)]
+struct NumberSummary {
+    mean: Option<f64>,
+    stddev: Option<f64>,
+    min: Option<f64>,
+    max: Option<f64>,
+}
+
+fn summarize_numbers(values: impl Iterator<Item = f64>) -> NumberSummary {
+    let values = values.filter(|value| value.is_finite()).collect::<Vec<_>>();
+    if values.is_empty() {
+        return NumberSummary {
+            mean: None,
+            stddev: None,
+            min: None,
+            max: None,
+        };
+    }
+    let mean = values.iter().copied().sum::<f64>() / values.len() as f64;
+    let variance = if values.len() > 1 {
+        values
+            .iter()
+            .map(|value| {
+                let delta = value - mean;
+                delta * delta
+            })
+            .sum::<f64>()
+            / (values.len() - 1) as f64
+    } else {
+        0.0
+    };
+    NumberSummary {
+        mean: Some(mean),
+        stddev: Some(variance.sqrt()),
+        min: values.iter().copied().reduce(f64::min),
+        max: values.iter().copied().reduce(f64::max),
+    }
+}
+
+fn byproduct_strength_label(run_name: &str) -> String {
+    run_name
+        .rsplit_once('_')
+        .map(|(_, suffix)| suffix.to_string())
+        .filter(|suffix| suffix.starts_with("byp"))
+        .unwrap_or_else(|| run_name.to_string())
+}
+
+fn mean_f64(values: impl Iterator<Item = f64>) -> Option<f64> {
+    let mut count = 0usize;
+    let mut sum = 0.0;
+    for value in values {
+        if value.is_finite() {
+            count += 1;
+            sum += value;
+        }
+    }
+    (count > 0).then_some(sum / count as f64)
 }
 
 fn read_run_rng_seed(run_dir: &Path) -> Option<u64> {
@@ -3861,6 +4120,26 @@ mod tests {
         let analysis = ComparisonAnalysis {
             runs: vec![run("with_events", Some(2.5)), run("without_events", None)],
             paired_byproduct_population: Vec::new(),
+            byproduct_strength_aggregates: vec![ByproductStrengthAggregate {
+                label: "byp008".to_string(),
+                run_count: 2,
+                mean_byproduct_amount: Some(10.0),
+                mean_delta_final_population: Some(25.0),
+                sd_delta_final_population: Some(5.0),
+                min_delta_final_population: Some(20.0),
+                max_delta_final_population: Some(30.0),
+                mean_final_population_ratio: Some(1.2),
+                mean_delta_growth_factor: Some(2.0),
+                mean_delta_final_avg_energy: Some(-0.1),
+                mean_signed_excess_retained_fraction: Some(-0.2),
+                mean_clipped_excess_retained_fraction: Some(0.4),
+                sd_clipped_excess_retained_fraction: Some(0.1),
+                min_clipped_excess_retained_fraction: Some(0.3),
+                max_clipped_excess_retained_fraction: Some(0.5),
+                positive_population_delta_count: 1,
+                positive_signed_excess_count: 0,
+                clipped_excess_warning_count: 0,
+            }],
             findings: Vec::new(),
             warnings: Vec::new(),
         };
@@ -3884,6 +4163,10 @@ mod tests {
         ));
         assert!(markdown.contains(
             "| without_events | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a |"
+        ));
+        assert!(markdown.contains("## Byproduct Strength Aggregates"));
+        assert!(markdown.contains(
+            "| byp008 | 2 | 10.000 | 25.000 | 5.000 | 20.000..30.000 | 1/2 | 1.200 | 2.000 | -0.100 | -0.200 | 0/2 | 0.400 | 0.100 | 0.300..0.500 | 0/2 |"
         ));
     }
 
@@ -4379,6 +4662,13 @@ mod tests {
         assert_eq!(pairs[0].final_population_ratio, Some(1.25));
         assert_eq!(pairs[0].delta_growth_factor, Some(2.5));
         assert_eq!(pairs[0].delta_final_avg_energy, Some(0.09999999999999998));
+
+        let aggregates = summarize_byproduct_strength_aggregates(&pairs);
+        assert_eq!(aggregates.len(), 1);
+        assert_eq!(aggregates[0].label, "byp008");
+        assert_eq!(aggregates[0].run_count, 1);
+        assert_eq!(aggregates[0].mean_delta_final_population, Some(25.0));
+        assert_eq!(aggregates[0].positive_population_delta_count, 1);
     }
 
     #[test]
