@@ -199,11 +199,25 @@ model stable.
   1.588/1.417. However, high strength also produced the most byproduct and had
   negative signed excess in every seed, so this should be interpreted as strong
   removal/ecological redistribution rather than proof of a better chemistry.
+- Compact transport-flux counters: v2 summaries now include accepted membrane
+  transport flux by external species, split into uptake and secretion amounts
+  plus event counts. `marl-analyze run` reports the top transported external
+  species in terminal output and writes the full table in Markdown/JSON. This
+  provides direct mechanism evidence without full `stoich_v2_events.csv`
+  logging.
+- Transport-flux smoke evidence: paired 48x48x24, 120-tick seed-41001 runs at
+  zero and default (`0.08`) byproduct strength both ended at 354 cells and
+  showed species 0 as net secreted, not net imported. The default run moved
+  species 0 at uptake 0.055 / secretion 28.063, while the zero-byproduct
+  control moved uptake 0.080 / secretion 28.145. In this short controlled slice,
+  the evolved species-0 pool is therefore not evidence of byproduct-specific
+  free-energy uptake; it looks like a general secretion/export side effect or
+  extracellular work-currency leakage pattern that deserves longer-run
+  attribution.
 
-The next implementation target is direct evidence for the mechanisms behind
-signed depletion and clipped accumulation: add transport flux counters by
-external species and, where feasible, lineage or starter attribution for
-producer/consumer separation. Until then, byproduct calibration can say which
-settings leave adjusted pools behind, but not whether those pools are consumed
-by cross-feeding, removed by decay/redistribution, or suppressed by altered
-production.
+The next implementation target is producer/consumer separation for these
+mechanisms: add lineage or starter attribution to compact byproduct and
+transport counters where feasible. Byproduct calibration can now say which
+settings leave adjusted pools behind and which external species are directly
+imported or exported, but it still cannot prove whether one lineage produces a
+pool that another lineage consumes.

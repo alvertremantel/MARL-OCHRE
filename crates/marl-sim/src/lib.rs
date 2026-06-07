@@ -716,7 +716,10 @@ pub fn run(cfg: Config, _use_gpu_diffusion: bool) -> Result<(), String> {
         }
     }
 
-    if cfg.output.write_stoich_v2_summary || cfg.simulation.stoich_enforcement.is_enabled() {
+    if cfg.output.write_stoich_v2_summary
+        || cfg.output.write_stoich_v2_events
+        || cfg.simulation.stoich_enforcement.is_enabled()
+    {
         if let Err(e) = logger.write_stoich_v2_summary(
             cfg.output.max_ticks,
             effective_stoich_enforcement,
@@ -1190,6 +1193,43 @@ mod tests {
         let dir = PathBuf::from(&out_dir);
         let events = fs::read_to_string(dir.join("stoich_v2_events.csv")).unwrap();
         assert!(events.contains(",reactions,legacy_reaction,"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn v2_events_only_mode_persists_compact_transport_flux_summary() {
+        let out_dir = test_output_dir("marl_sim_v2_events_transport_summary_test");
+        let mut cfg = Config::default();
+        cfg.simulation.stoich_enforcement = StoichEnforcement::Off;
+        cfg.output.output_dir = out_dir.clone();
+        cfg.output.max_ticks = 1;
+        cfg.output.stats_interval = 0;
+        cfg.output.snapshot_interval = 0;
+        cfg.output.image_interval = 0;
+        cfg.output.seed_count = 3;
+        cfg.output.write_binary_field = false;
+        cfg.output.write_binary_cells = false;
+        cfg.output.write_stoich_v2_summary = false;
+        cfg.output.write_stoich_v2_events = true;
+        cfg.output.write_ancestry_map = false;
+        cfg.output.write_density_map = false;
+
+        run(cfg, false).unwrap();
+
+        let dir = PathBuf::from(&out_dir);
+        let summary = fs::read_to_string(dir.join("stoich_v2_summary.json")).unwrap();
+        let summary_json: serde_json::Value = serde_json::from_str(&summary).unwrap();
+        assert_eq!(summary_json["enforcement"], "audit");
+        let fluxes = summary_json["ledger"]["transport_flux_by_species"]
+            .as_array()
+            .expect("v2 summary should serialize transport flux counters");
+        assert!(fluxes.iter().any(|flux| {
+            flux["uptake_amount"].as_f64().unwrap_or(0.0) > 0.0
+                || flux["secretion_amount"].as_f64().unwrap_or(0.0) > 0.0
+        }));
+        let events = fs::read_to_string(dir.join("stoich_v2_events.csv")).unwrap();
+        assert!(events.contains("tick,stage,kind"));
 
         let _ = fs::remove_dir_all(&dir);
     }

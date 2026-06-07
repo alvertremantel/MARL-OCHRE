@@ -445,6 +445,12 @@ impl CellState {
                 && record_full_stoich
                 && let Some(ledger) = stoich.as_deref_mut()
             {
+                ledger.record_transport_secretion(ext_idx, amount);
+            }
+            if amount > 0.0
+                && record_full_stoich
+                && let Some(ledger) = stoich.as_deref_mut()
+            {
                 ledger.record(
                     StoichRecord::new(
                         StoichStage::CellTransport,
@@ -468,6 +474,12 @@ impl CellState {
             let amount = accepted_uptake[i] * transport_scale;
             accepted_uptake_by_int[int_idx] += amount;
             field_deltas[ext_idx] -= amount;
+            if amount > 0.0
+                && record_full_stoich
+                && let Some(ledger) = stoich.as_deref_mut()
+            {
+                ledger.record_transport_uptake(ext_idx, amount);
+            }
             if amount > 0.0
                 && record_full_stoich
                 && let Some(ledger) = stoich.as_deref_mut()
@@ -1264,6 +1276,12 @@ mod tests {
             .expect("scaled transport cost event should be recorded");
         assert!((transport_event.amount - 0.5).abs() < 1e-6);
         assert!((cost_event.amount - full_cost * 0.5).abs() < 1e-6);
+
+        let flux = ledger.transport_flux_by_species[EXT_REDUCTANT];
+        assert!((flux.uptake_amount - 0.5).abs() < 1e-6);
+        assert_eq!(flux.uptake_events, 1);
+        assert_eq!(flux.secretion_amount, 0.0);
+        assert_eq!(flux.secretion_events, 0);
     }
 
     #[test]
@@ -1299,6 +1317,37 @@ mod tests {
         assert!(cost_event.balanced);
         assert!((cost_event.model_delta.energy + expected_cost).abs() < 1e-6);
         assert!((cost_event.reservoir_delta.energy - expected_cost).abs() < 1e-6);
+    }
+
+    #[test]
+    fn transport_secretion_records_directional_flux_summary() {
+        let mut ruleset = test_ruleset();
+        ruleset.transport[0] = TransportParams {
+            uptake_rate: 0.0,
+            secrete_rate: 100.0,
+            ext_species: EXT_STRUCTURAL as u8,
+            int_species: 7,
+            gate_receptor: 0,
+            gate_weight: 0.0,
+        };
+        let sim = SimulationConfig {
+            lambda_maintenance: 0.0,
+            stoich_enforcement: marl_config::stoich::StoichEnforcement::Audit,
+            ..SimulationConfig::default()
+        };
+        let mut cell = test_cell(ruleset);
+        cell.internal[7] = 0.25;
+        let ext = [0.0f32; S_EXT];
+        let mut ledger = StoichTickLedger::default();
+
+        let (deltas, _) = cell.tick_with_stoich(&ext, 0.0, &sim, Some(&mut ledger), true, true);
+
+        assert!((deltas[EXT_STRUCTURAL] - 0.25).abs() < 1e-6);
+        let flux = ledger.transport_flux_by_species[EXT_STRUCTURAL];
+        assert_eq!(flux.uptake_amount, 0.0);
+        assert_eq!(flux.uptake_events, 0);
+        assert!((flux.secretion_amount - 0.25).abs() < 1e-6);
+        assert_eq!(flux.secretion_events, 1);
     }
 
     #[test]

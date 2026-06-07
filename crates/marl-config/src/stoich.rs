@@ -320,6 +320,15 @@ pub struct StoichSpeciesEventSummary {
     pub events: u64,
 }
 
+#[derive(Debug, Clone, Copy, Default, serde::Serialize)]
+pub struct StoichTransportFluxSummary {
+    pub species_index: i16,
+    pub uptake_amount: f32,
+    pub uptake_events: u64,
+    pub secretion_amount: f32,
+    pub secretion_events: u64,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct StoichRecord {
     pub stage: StoichStage,
@@ -420,6 +429,7 @@ pub struct StoichTickLedger {
     pub reaction_byproduct: StoichEventKindSummary,
     pub reaction_byproduct_by_species: [StoichSpeciesEventSummary; STOICH_BYPRODUCT_SPECIES_COUNT],
     pub reaction_leakage: StoichEventKindSummary,
+    pub transport_flux_by_species: [StoichTransportFluxSummary; S_EXT],
     pub events: Vec<StoichEvent>,
 }
 
@@ -444,6 +454,10 @@ impl Default for StoichTickLedger {
                 ..StoichSpeciesEventSummary::default()
             }),
             reaction_leakage: StoichEventKindSummary::default(),
+            transport_flux_by_species: std::array::from_fn(|i| StoichTransportFluxSummary {
+                species_index: i as i16,
+                ..StoichTransportFluxSummary::default()
+            }),
             events: Vec::new(),
         }
     }
@@ -472,6 +486,26 @@ fn add_event_kind_summary(run: &mut StoichEventKindSummary, tick: StoichEventKin
 }
 
 impl StoichTickLedger {
+    pub fn record_transport_uptake(&mut self, species_index: usize, amount: f32) {
+        if amount <= 0.0 || !amount.is_finite() {
+            return;
+        }
+        if let Some(summary) = self.transport_flux_by_species.get_mut(species_index) {
+            summary.uptake_amount += amount;
+            summary.uptake_events += 1;
+        }
+    }
+
+    pub fn record_transport_secretion(&mut self, species_index: usize, amount: f32) {
+        if amount <= 0.0 || !amount.is_finite() {
+            return;
+        }
+        if let Some(summary) = self.transport_flux_by_species.get_mut(species_index) {
+            summary.secretion_amount += amount;
+            summary.secretion_events += 1;
+        }
+    }
+
     pub fn record(&mut self, record: StoichRecord, keep_event: bool) -> StoichBudgetDelta {
         if record.amount < 0.0 || !record.amount.is_finite() {
             return StoichBudgetDelta::default();
@@ -681,6 +715,7 @@ pub struct StoichRunLedger {
     pub reaction_byproduct: StoichEventKindSummary,
     pub reaction_byproduct_by_species: [StoichSpeciesEventSummary; STOICH_BYPRODUCT_SPECIES_COUNT],
     pub reaction_leakage: StoichEventKindSummary,
+    pub transport_flux_by_species: [StoichTransportFluxSummary; S_EXT],
 }
 
 impl Default for StoichRunLedger {
@@ -705,6 +740,10 @@ impl Default for StoichRunLedger {
                 ..StoichSpeciesEventSummary::default()
             }),
             reaction_leakage: StoichEventKindSummary::default(),
+            transport_flux_by_species: std::array::from_fn(|i| StoichTransportFluxSummary {
+                species_index: i as i16,
+                ..StoichTransportFluxSummary::default()
+            }),
         }
     }
 }
@@ -745,6 +784,16 @@ impl StoichRunLedger {
             run.events += tick.events;
         }
         add_event_kind_summary(&mut self.reaction_leakage, tick.reaction_leakage);
+        for (run, tick) in self
+            .transport_flux_by_species
+            .iter_mut()
+            .zip(tick.transport_flux_by_species)
+        {
+            run.uptake_amount += tick.uptake_amount;
+            run.uptake_events += tick.uptake_events;
+            run.secretion_amount += tick.secretion_amount;
+            run.secretion_events += tick.secretion_events;
+        }
     }
 
     pub fn material_abs_sum(&self) -> f32 {
@@ -1265,6 +1314,34 @@ mod tests {
         assert_eq!(run.net_material_abs_sum(), 0.0);
         assert_eq!(run.material_abs_sum(), 6.0);
         assert_eq!(run.total_abs_sum(), 11.0);
+    }
+
+    #[test]
+    fn run_ledger_accumulates_directional_transport_flux() {
+        let mut run = StoichRunLedger::default();
+
+        let mut tick_a = StoichTickLedger::default();
+        tick_a.record_transport_uptake(3, 1.5);
+        tick_a.record_transport_secretion(3, 0.25);
+        run.add_tick(&tick_a);
+
+        let mut tick_b = StoichTickLedger::default();
+        tick_b.record_transport_uptake(3, 0.5);
+        tick_b.record_transport_secretion(4, 2.0);
+        run.add_tick(&tick_b);
+
+        let carbon = run.transport_flux_by_species[3];
+        assert_eq!(carbon.species_index, 3);
+        assert!((carbon.uptake_amount - 2.0).abs() < f32::EPSILON);
+        assert_eq!(carbon.uptake_events, 2);
+        assert!((carbon.secretion_amount - 0.25).abs() < f32::EPSILON);
+        assert_eq!(carbon.secretion_events, 1);
+
+        let organic = run.transport_flux_by_species[4];
+        assert_eq!(organic.uptake_amount, 0.0);
+        assert_eq!(organic.uptake_events, 0);
+        assert!((organic.secretion_amount - 2.0).abs() < f32::EPSILON);
+        assert_eq!(organic.secretion_events, 1);
     }
 
     #[test]
